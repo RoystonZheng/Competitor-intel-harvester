@@ -1,0 +1,42 @@
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+.venv-*/
+venv/
+env/
+
+# Local configuration and logs
+.env
+*.log
+*.err
+
+# Runtime outputs and user data
+runs/
+models/
+search_cards/
+training_data/review_labels.csv
+downloaded_images/
+gui_review_snapshots/
+
+# Local experiments / presentation artifacts
+15分钟实验_*/
+测试交付/
+report_assets/
+汇报文档_*.md
+竞品收录策略与AICool策略对比.md
+
+# Build artifacts
+build/
+dist/

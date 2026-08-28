@@ -1,0 +1,1066 @@
+version: "0.5.0"
+kind: app
+app:
+  name: 竞品情报采集器
+  mode: workflow
+  icon: "\U0001F50E"
+  icon_background: "#E8F1FF"
+  description: "通过本地竞品情报采集器 API 串联 SearXNG、Crawl4AI、icrawler 与 Codex 分析，自动生成竞品采集计划、原始材料、筛选材料、图片内嵌分析报告和复核队列。"
+  use_icon_as_answer_icon: false
+dependencies: []
+workflow:
+  conversation_variables: []
+  environment_variables: []
+  features:
+    file_upload:
+      enabled: false
+    opening_statement: ""
+    retriever_resource:
+      enabled: false
+    sensitive_word_avoidance:
+      enabled: false
+    speech_to_text:
+      enabled: false
+    suggested_questions: []
+    suggested_questions_after_answer:
+      enabled: false
+    text_to_speech:
+      enabled: false
+  graph:
+    viewport:
+      x: 0
+      y: 0
+      zoom: 0.8
+    nodes:
+      - id: start
+        type: custom
+        data:
+          type: start
+          title: 输入采集参数
+          desc: "填写竞品、自己的产品定位和本地服务地址；如只想查询已有任务状态，填写任务 ID 即可。"
+          selected: false
+          variables:
+            - variable: harvester_base_url
+              label: 本地采集器地址
+              type: text-input
+              required: true
+              default: "http://127.0.0.1:8765"
+              hint: "这是 Dify 后端访问采集器的地址。如果 Dify 跟采集器都在本机直接运行，用 http://127.0.0.1:8765；如果 Dify 在 Docker/服务器里，需要填它能访问到的宿主机 IP，例如 http://192.168.x.x:8765。"
+              max_length: 256
+            - variable: job_id_to_check
+              label: 查询已有任务 ID
+              type: text-input
+              required: false
+              default: ""
+              max_length: 128
+            - variable: competitors
+              label: 竞品名单
+              type: paragraph
+              required: false
+              default: ""
+              max_length: 4000
+            - variable: own_product_name
+              label: 我的产品名称
+              type: text-input
+              required: false
+              default: "我的产品"
+              max_length: 256
+            - variable: own_product_positioning
+              label: 我的产品定位
+              type: paragraph
+              required: false
+              default: ""
+              max_length: 4000
+            - variable: own_product_context
+              label: 补充业务背景
+              type: paragraph
+              required: false
+              default: ""
+              max_length: 6000
+            - variable: searxng_url
+              label: SearXNG 地址
+              type: text-input
+              required: true
+              default: "http://localhost:8888"
+              max_length: 256
+            - variable: proxy_url
+              label: 代理地址
+              type: text-input
+              required: false
+              default: "http://127.0.0.1:7897"
+              max_length: 256
+            - variable: per_query
+              label: 每词搜索结果数
+              type: number
+              required: true
+              default: 20
+            - variable: max_pages
+              label: 最大抓取网页数
+              type: number
+              required: true
+              default: 30
+            - variable: crawl_concurrency
+              label: Crawl4AI 并发数
+              type: number
+              required: true
+              default: 3
+            - variable: image_engine
+              label: 图片搜索引擎
+              type: select
+              required: true
+              default: bing
+              options:
+                - bing
+                - baidu
+                - google
+            - variable: max_image_downloads
+              label: 每品下载图片数
+              type: number
+              required: true
+              default: 40
+            - variable: image_terms
+              label: 图片补充关键词
+              type: text-input
+              required: false
+              default: "product, screenshot, UI"
+              max_length: 512
+            - variable: experiment_minutes
+              label: 实验限时分钟
+              type: select
+              required: true
+              default: "0"
+              options:
+                - "0"
+                - "15"
+                - "30"
+            - variable: broad_crawl
+              label: 尽可能多抓取
+              type: select
+              required: false
+              default: "true"
+              options:
+                - "true"
+                - "false"
+            - variable: codex_review
+              label: 启用 Codex 分析
+              type: select
+              required: false
+              default: "true"
+              options:
+                - "true"
+                - "false"
+            - variable: skip_crawl
+              label: 跳过网页抓取
+              type: select
+              required: false
+              default: "false"
+              options:
+                - "false"
+                - "true"
+            - variable: skip_images
+              label: 跳过图片下载
+              type: select
+              required: false
+              default: "false"
+              options:
+                - "false"
+                - "true"
+            - variable: no_cn
+              label: 排除中文来源
+              type: select
+              required: false
+              default: "false"
+              options:
+                - "false"
+                - "true"
+            - variable: codex_model
+              label: Codex 模型
+              type: text-input
+              required: false
+              default: ""
+              max_length: 128
+        position:
+          x: 80
+          y: 220
+        positionAbsolute:
+          x: 80
+          y: 220
+        sourcePosition: right
+        targetPosition: left
+        width: 244
+        height: 640
+      - id: route_by_job_id
+        type: custom
+        data:
+          type: if-else
+          title: 新建任务或查询任务
+          desc: "填写任务 ID 时走查询分支；未填写时新建采集任务。"
+          selected: false
+          isInIteration: false
+          isInLoop: false
+          cases:
+            - id: has_job_id
+              case_id: has_job_id
+              logical_operator: and
+              conditions:
+                - id: job_id_present
+                  variable_selector:
+                    - start
+                    - job_id_to_check
+                  comparison_operator: not empty
+                  value: ""
+                  varType: string
+        position:
+          x: 380
+          y: 220
+        positionAbsolute:
+          x: 380
+          y: 220
+        sourcePosition: right
+        targetPosition: left
+        width: 244
+        height: 160
+      - id: check_existing_job
+        type: custom
+        data:
+          type: http-request
+          title: 查询已有任务
+          desc: "读取本地采集器中的任务状态、产物列表和下载地址。"
+          selected: false
+          variables: []
+          method: get
+          url: "{{#start.harvester_base_url#}}/api/jobs/{{#start.job_id_to_check#}}"
+          headers: ""
+          params: ""
+          body:
+            type: none
+            data: []
+          authorization:
+            type: no-auth
+          timeout:
+            connect: 10
+            read: 60
+            write: 10
+          retry_config:
+            retry_enabled: false
+        position:
+          x: 700
+          y: 40
+        positionAbsolute:
+          x: 700
+          y: 40
+        sourcePosition: right
+        targetPosition: left
+        width: 244
+        height: 120
+      - id: parse_existing_job
+        type: custom
+        data:
+          type: code
+          title: 整理查询结果
+          desc: "把任务 JSON 转成可读摘要和常用下载链接。"
+          selected: false
+          code_language: python3
+          variables:
+            - variable: body
+              value_selector:
+                - check_existing_job
+                - body
+            - variable: status_code
+              value_selector:
+                - check_existing_job
+                - status_code
+            - variable: base_url
+              value_selector:
+                - start
+                - harvester_base_url
+          outputs:
+            summary_markdown:
+              type: string
+              children: null
+            job_id:
+              type: string
+              children: null
+            status:
+              type: string
+              children: null
+            out_dir:
+              type: string
+              children: null
+            status_url:
+              type: string
+              children: null
+            report_url:
+              type: string
+              children: null
+            sources_url:
+              type: string
+              children: null
+            unfiltered_url:
+              type: string
+              children: null
+            filtered_url:
+              type: string
+              children: null
+            principles_url:
+              type: string
+              children: null
+            review_queue_url:
+              type: string
+              children: null
+            artifacts_text:
+              type: string
+              children: null
+            raw_json:
+              type: string
+              children: null
+          code: |
+            import json
+            from urllib.parse import quote
+
+            REPORT = "竞品分析报告_图片内嵌版.md"
+            SOURCES = "所有采集来源.csv"
+            UNFILTERED = "未经筛选的采集内容.md"
+            FILTERED = "筛选后的采集内容.md"
+            PRINCIPLES = "采集原则和筛选原则.md"
+            REVIEW = "人工复核队列.md"
+            TRAINING_SAMPLE = "人工抽样标注表.csv"
+            ML_STATUS = "本地筛选模型状态.json"
+
+            def _read_json(body):
+                if isinstance(body, dict):
+                    return body
+                try:
+                    return json.loads(body or "{}")
+                except Exception:
+                    return {"parse_error": True, "raw_body": str(body or "")[:4000]}
+
+            def _download_url(base_url, job_id, filename):
+                if not base_url or not job_id:
+                    return ""
+                return f"{base_url.rstrip('/')}/download?job={quote(str(job_id))}&file={quote(filename)}"
+
+            def main(body: str, status_code: int, base_url: str) -> dict:
+                data = _read_json(body)
+                job_id = str(data.get("id") or "")
+                status = str(data.get("status") or "unknown")
+                out_dir = str(data.get("out_dir") or "")
+                artifacts = data.get("artifacts") or []
+                if isinstance(artifacts, list):
+                    artifacts_text = "\n".join([f"- {item}" for item in artifacts])
+                else:
+                    artifacts_text = str(artifacts)
+
+                status_url = f"{base_url.rstrip('/')}/api/jobs/{quote(job_id)}" if job_id else ""
+                report_url = _download_url(base_url, job_id, REPORT)
+                sources_url = _download_url(base_url, job_id, SOURCES)
+                unfiltered_url = _download_url(base_url, job_id, UNFILTERED)
+                filtered_url = _download_url(base_url, job_id, FILTERED)
+                principles_url = _download_url(base_url, job_id, PRINCIPLES)
+                review_queue_url = _download_url(base_url, job_id, REVIEW)
+                training_sample_url = _download_url(base_url, job_id, TRAINING_SAMPLE)
+                ml_status_url = _download_url(base_url, job_id, ML_STATUS)
+
+                elapsed = data.get("elapsed_label") or data.get("duration_label") or ""
+                command = data.get("command") or ""
+                logs = data.get("logs") or ""
+                if isinstance(logs, list):
+                    logs_tail = "\n".join(logs[-20:])
+                else:
+                    logs_tail = str(logs)[-3000:]
+
+                lines = [
+                    "## 竞品情报采集任务状态",
+                    "",
+                    f"- HTTP 状态码：{status_code}",
+                    f"- 任务 ID：{job_id or '未返回'}",
+                    f"- 当前状态：{status}",
+                    f"- 已耗时：{elapsed or '未返回'}",
+                    f"- 输出目录：{out_dir or '未返回'}",
+                    "",
+                    "### 常用链接",
+                    f"- 状态查询：{status_url or '未返回'}",
+                    f"- 分析报告：{report_url or '任务完成后生成'}",
+                    f"- 所有采集来源：{sources_url or '任务完成后生成'}",
+                    f"- 未经筛选内容：{unfiltered_url or '任务完成后生成'}",
+                    f"- 筛选后内容：{filtered_url or '任务完成后生成'}",
+                    f"- 采集和筛选原则：{principles_url or '任务完成后生成'}",
+                    f"- 人工复核队列：{review_queue_url or '任务完成后生成'}",
+                    f"- 人工抽样标注表：{training_sample_url or '任务完成后生成'}",
+                    f"- 本地筛选模型状态：{ml_status_url or '任务完成后生成'}",
+                    "",
+                    "### 已发现产物",
+                    artifacts_text or "暂无产物列表。",
+                    "",
+                    "### 最近日志",
+                    "```text",
+                    logs_tail or "暂无日志。",
+                    "```",
+                ]
+                if command:
+                    lines.extend(["", "### 本地执行命令", "```text", str(command), "```"])
+
+                return {
+                    "summary_markdown": "\n".join(lines),
+                    "job_id": job_id,
+                    "status": status,
+                    "out_dir": out_dir,
+                    "status_url": status_url,
+                    "report_url": report_url,
+                    "sources_url": sources_url,
+                    "unfiltered_url": unfiltered_url,
+                    "filtered_url": filtered_url,
+                    "principles_url": principles_url,
+                    "review_queue_url": review_queue_url,
+                    "artifacts_text": artifacts_text,
+                    "raw_json": json.dumps(data, ensure_ascii=False, indent=2),
+                }
+        position:
+          x: 1010
+          y: 40
+        positionAbsolute:
+          x: 1010
+          y: 40
+        sourcePosition: right
+        targetPosition: left
+        width: 244
+        height: 120
+      - id: end_existing_job
+        type: custom
+        data:
+          type: end
+          title: 返回任务状态
+          desc: ""
+          selected: false
+          outputs:
+            - variable: result
+              value_selector:
+                - llm_existing_job
+                - text
+            - variable: summary_markdown
+              value_selector:
+                - llm_existing_job
+                - text
+            - variable: job_id
+              value_selector:
+                - parse_existing_job
+                - job_id
+            - variable: status
+              value_selector:
+                - parse_existing_job
+                - status
+            - variable: out_dir
+              value_selector:
+                - parse_existing_job
+                - out_dir
+            - variable: report_url
+              value_selector:
+                - parse_existing_job
+                - report_url
+            - variable: raw_json
+              value_selector:
+                - parse_existing_job
+                - raw_json
+        position:
+          x: 1630
+          y: 40
+        positionAbsolute:
+          x: 1630
+          y: 40
+        sourcePosition: right
+        targetPosition: left
+        width: 244
+        height: 120
+      - id: llm_existing_job
+        type: custom
+        data:
+          type: llm
+          title: 生成查询结果回复
+          desc: "导入 Dify 后在这里配置大模型；用于把已有任务状态和产物链接整理成最终输出。"
+          selected: false
+          model:
+            provider: ""
+            name: ""
+            mode: chat
+            completion_params:
+              temperature: 0.2
+          prompt_template:
+            - role: system
+              text: "你是一个产品经理的竞品情报助手。你的任务是把工具运行结果整理成清楚、可执行、不要夸张的中文回复。保留任务 ID、状态、输出目录、报告链接、来源链接和必要日志。不要编造没有出现在输入中的信息。"
+            - role: user
+              text: |
+                请根据下面的任务状态，输出一份最终可读结果。
+
+                要求：
+                1. 先说明任务是否完成、失败或仍在运行。
+                2. 如果已有报告或产物链接，列出最重要的下载入口。
+                3. 如果仍在运行，告诉用户稍后用任务 ID 查询。
+                4. 如有错误日志，只保留最关键的排查线索。
+
+                任务状态：
+                {{#parse_existing_job.summary_markdown#}}
+          context:
+            enabled: false
+            variable_selector: []
+          vision:
+            enabled: false
+        position:
+          x: 1320
+          y: 40
+        positionAbsolute:
+          x: 1320
+          y: 40
+        sourcePosition: right
+        targetPosition: left
+        width: 244
+        height: 120
+      - id: check_environment
+        type: custom
+        data:
+          type: http-request
+          title: 环境检查
+          desc: "检查 SearXNG、代理、Crawl4AI、icrawler 和 Python 环境。"
+          selected: false
+          variables: []
+          method: get
+          url: "{{#start.harvester_base_url#}}/api/check"
+          headers: ""
+          params: "searxng_url={{#start.searxng_url#}}&proxy_url={{#start.proxy_url#}}"
+          body:
+            type: none
+            data: []
+          authorization:
+            type: no-auth
+          timeout:
+            connect: 10
+            read: 60
+            write: 10
+          retry_config:
+            retry_enabled: false
+        position:
+          x: 700
+          y: 360
+        positionAbsolute:
+          x: 700
+          y: 360
+        sourcePosition: right
+        targetPosition: left
+        width: 244
+        height: 120
+      - id: start_collection_job
+        type: custom
+        data:
+          type: http-request
+          title: 启动采集任务
+          desc: "提交采集任务；本地服务会在后台运行完整采集和 Codex 分析。"
+          selected: false
+          variables: []
+          method: post
+          url: "{{#start.harvester_base_url#}}/api/jobs"
+          headers: "Content-Type: application/json"
+          params: ""
+          body:
+            type: json
+            data:
+              - id: body-competitors
+                key: competitors
+                type: text
+                value: "{{#start.competitors#}}"
+              - id: body-own-product-name
+                key: own_product_name
+                type: text
+                value: "{{#start.own_product_name#}}"
+              - id: body-own-product-positioning
+                key: own_product_positioning
+                type: text
+                value: "{{#start.own_product_positioning#}}"
+              - id: body-own-product-context
+                key: own_product_context
+                type: text
+                value: "{{#start.own_product_context#}}"
+              - id: body-searxng-url
+                key: searxng_url
+                type: text
+                value: "{{#start.searxng_url#}}"
+              - id: body-proxy-url
+                key: proxy_url
+                type: text
+                value: "{{#start.proxy_url#}}"
+              - id: body-per-query
+                key: per_query
+                type: text
+                value: "{{#start.per_query#}}"
+              - id: body-max-pages
+                key: max_pages
+                type: text
+                value: "{{#start.max_pages#}}"
+              - id: body-crawl-concurrency
+                key: crawl_concurrency
+                type: text
+                value: "{{#start.crawl_concurrency#}}"
+              - id: body-image-engine
+                key: image_engine
+                type: text
+                value: "{{#start.image_engine#}}"
+              - id: body-max-image-downloads
+                key: max_image_downloads
+                type: text
+                value: "{{#start.max_image_downloads#}}"
+              - id: body-image-terms
+                key: image_terms
+                type: text
+                value: "{{#start.image_terms#}}"
+              - id: body-experiment-minutes
+                key: experiment_minutes
+                type: text
+                value: "{{#start.experiment_minutes#}}"
+              - id: body-broad-crawl
+                key: broad_crawl
+                type: text
+                value: "{{#start.broad_crawl#}}"
+              - id: body-codex-review
+                key: codex_review
+                type: text
+                value: "{{#start.codex_review#}}"
+              - id: body-skip-crawl
+                key: skip_crawl
+                type: text
+                value: "{{#start.skip_crawl#}}"
+              - id: body-skip-images
+                key: skip_images
+                type: text
+                value: "{{#start.skip_images#}}"
+              - id: body-no-cn
+                key: no_cn
+                type: text
+                value: "{{#start.no_cn#}}"
+              - id: body-codex-model
+                key: codex_model
+                type: text
+                value: "{{#start.codex_model#}}"
+          authorization:
+            type: no-auth
+          timeout:
+            connect: 10
+            read: 60
+            write: 10
+          retry_config:
+            retry_enabled: false
+        position:
+          x: 1010
+          y: 360
+        positionAbsolute:
+          x: 1010
+          y: 360
+        sourcePosition: right
+        targetPosition: left
+        width: 244
+        height: 120
+      - id: parse_started_job
+        type: custom
+        data:
+          type: code
+          title: 整理新任务结果
+          desc: "返回任务 ID、状态接口和最终文件下载链接。"
+          selected: false
+          code_language: python3
+          variables:
+            - variable: body
+              value_selector:
+                - start_collection_job
+                - body
+            - variable: status_code
+              value_selector:
+                - start_collection_job
+                - status_code
+            - variable: base_url
+              value_selector:
+                - start
+                - harvester_base_url
+            - variable: env_body
+              value_selector:
+                - check_environment
+                - body
+          outputs:
+            summary_markdown:
+              type: string
+              children: null
+            job_id:
+              type: string
+              children: null
+            status:
+              type: string
+              children: null
+            out_dir:
+              type: string
+              children: null
+            status_url:
+              type: string
+              children: null
+            report_url:
+              type: string
+              children: null
+            sources_url:
+              type: string
+              children: null
+            unfiltered_url:
+              type: string
+              children: null
+            filtered_url:
+              type: string
+              children: null
+            principles_url:
+              type: string
+              children: null
+            review_queue_url:
+              type: string
+              children: null
+            artifacts_text:
+              type: string
+              children: null
+            raw_json:
+              type: string
+              children: null
+          code: |
+            import json
+            from urllib.parse import quote
+
+            REPORT = "竞品分析报告_图片内嵌版.md"
+            SOURCES = "所有采集来源.csv"
+            UNFILTERED = "未经筛选的采集内容.md"
+            FILTERED = "筛选后的采集内容.md"
+            PRINCIPLES = "采集原则和筛选原则.md"
+            REVIEW = "人工复核队列.md"
+            TRAINING_SAMPLE = "人工抽样标注表.csv"
+            ML_STATUS = "本地筛选模型状态.json"
+
+            def _read_json(body):
+                if isinstance(body, dict):
+                    return body
+                try:
+                    return json.loads(body or "{}")
+                except Exception:
+                    return {"parse_error": True, "raw_body": str(body or "")[:4000]}
+
+            def _download_url(base_url, job_id, filename):
+                if not base_url or not job_id:
+                    return ""
+                return f"{base_url.rstrip('/')}/download?job={quote(str(job_id))}&file={quote(filename)}"
+
+            def main(body: str, status_code: int, base_url: str, env_body: str) -> dict:
+                data = _read_json(body)
+                env = _read_json(env_body)
+                job_id = str(data.get("id") or "")
+                status = str(data.get("status") or "unknown")
+                out_dir = str(data.get("out_dir") or "")
+                artifacts = data.get("artifacts") or []
+                if isinstance(artifacts, list):
+                    artifacts_text = "\n".join([f"- {item}" for item in artifacts])
+                else:
+                    artifacts_text = str(artifacts)
+
+                status_url = f"{base_url.rstrip('/')}/api/jobs/{quote(job_id)}" if job_id else ""
+                report_url = _download_url(base_url, job_id, REPORT)
+                sources_url = _download_url(base_url, job_id, SOURCES)
+                unfiltered_url = _download_url(base_url, job_id, UNFILTERED)
+                filtered_url = _download_url(base_url, job_id, FILTERED)
+                principles_url = _download_url(base_url, job_id, PRINCIPLES)
+                review_queue_url = _download_url(base_url, job_id, REVIEW)
+                training_sample_url = _download_url(base_url, job_id, TRAINING_SAMPLE)
+                ml_status_url = _download_url(base_url, job_id, ML_STATUS)
+
+                elapsed = data.get("elapsed_label") or data.get("duration_label") or ""
+                command = data.get("command") or ""
+                logs = data.get("logs") or ""
+                if isinstance(logs, list):
+                    logs_tail = "\n".join(logs[-20:])
+                else:
+                    logs_tail = str(logs)[-3000:]
+
+                env_lines = []
+                if isinstance(env, dict):
+                    for key in ["status", "searxng", "proxy", "crawl4ai", "icrawler", "python"]:
+                        if key in env:
+                            env_lines.append(f"- {key}: {env.get(key)}")
+                if not env_lines:
+                    env_lines.append("- 环境检查结果未返回或无法解析。")
+
+                if not job_id:
+                    error = data.get("error") or data.get("message") or data.get("raw_body") or "未返回任务 ID。"
+                    lines = [
+                        "## 竞品情报采集任务未启动",
+                        "",
+                        f"- HTTP 状态码：{status_code}",
+                        f"- 错误信息：{error}",
+                        "",
+                        "### 环境检查",
+                        *env_lines,
+                        "",
+                        "### 原始响应",
+                        "```json",
+                        json.dumps(data, ensure_ascii=False, indent=2),
+                        "```",
+                    ]
+                else:
+                    lines = [
+                        "## 竞品情报采集任务已启动",
+                        "",
+                        f"- HTTP 状态码：{status_code}",
+                        f"- 任务 ID：{job_id}",
+                        f"- 当前状态：{status}",
+                        f"- 已耗时：{elapsed or '刚启动'}",
+                        f"- 输出目录：{out_dir or '任务完成后返回'}",
+                        "",
+                        "### 下一步",
+                        "任务在本地采集器后台继续运行。稍后用同一个 Dify 应用填写“查询已有任务 ID”，即可查看完成状态和下载文件。",
+                        "",
+                        "### 常用链接",
+                        f"- 状态查询：{status_url}",
+                        f"- 分析报告：{report_url}",
+                        f"- 所有采集来源：{sources_url}",
+                        f"- 未经筛选内容：{unfiltered_url}",
+                        f"- 筛选后内容：{filtered_url}",
+                        f"- 采集和筛选原则：{principles_url}",
+                        f"- 人工复核队列：{review_queue_url}",
+                        f"- 人工抽样标注表：{training_sample_url}",
+                        f"- 本地筛选模型状态：{ml_status_url}",
+                        "",
+                        "### 环境检查",
+                        *env_lines,
+                        "",
+                        "### 已发现产物",
+                        artifacts_text or "任务刚启动，暂无产物列表。",
+                        "",
+                        "### 最近日志",
+                        "```text",
+                        logs_tail or "任务刚启动，暂无日志。",
+                        "```",
+                    ]
+                    if command:
+                        lines.extend(["", "### 本地执行命令", "```text", str(command), "```"])
+
+                return {
+                    "summary_markdown": "\n".join(lines),
+                    "job_id": job_id,
+                    "status": status,
+                    "out_dir": out_dir,
+                    "status_url": status_url,
+                    "report_url": report_url,
+                    "sources_url": sources_url,
+                    "unfiltered_url": unfiltered_url,
+                    "filtered_url": filtered_url,
+                    "principles_url": principles_url,
+                    "review_queue_url": review_queue_url,
+                    "artifacts_text": artifacts_text,
+                    "raw_json": json.dumps(data, ensure_ascii=False, indent=2),
+                }
+        position:
+          x: 1320
+          y: 360
+        positionAbsolute:
+          x: 1320
+          y: 360
+        sourcePosition: right
+        targetPosition: left
+        width: 244
+        height: 120
+      - id: end_started_job
+        type: custom
+        data:
+          type: end
+          title: 返回新任务信息
+          desc: ""
+          selected: false
+          outputs:
+            - variable: result
+              value_selector:
+                - llm_started_job
+                - text
+            - variable: summary_markdown
+              value_selector:
+                - llm_started_job
+                - text
+            - variable: job_id
+              value_selector:
+                - parse_started_job
+                - job_id
+            - variable: status
+              value_selector:
+                - parse_started_job
+                - status
+            - variable: out_dir
+              value_selector:
+                - parse_started_job
+                - out_dir
+            - variable: report_url
+              value_selector:
+                - parse_started_job
+                - report_url
+            - variable: raw_json
+              value_selector:
+                - parse_started_job
+                - raw_json
+        position:
+          x: 1940
+          y: 360
+        positionAbsolute:
+          x: 1940
+          y: 360
+        sourcePosition: right
+        targetPosition: left
+        width: 244
+        height: 120
+      - id: llm_started_job
+        type: custom
+        data:
+          type: llm
+          title: 生成新任务回复
+          desc: "导入 Dify 后在这里配置大模型；用于把新建采集任务结果整理成最终输出。"
+          selected: false
+          model:
+            provider: ""
+            name: ""
+            mode: chat
+            completion_params:
+              temperature: 0.2
+          prompt_template:
+            - role: system
+              text: "你是一个产品经理的竞品情报助手。你的任务是把本地采集器返回的信息整理成清楚、可执行、不要夸张的中文回复。保留任务 ID、状态查询链接、报告下载链接和必要的环境检查信息。不要编造没有出现在输入中的信息。"
+            - role: user
+              text: |
+                请根据下面的新建任务结果，输出一份给产品经理看的结果。
+
+                要求：
+                1. 先说明任务是否已成功启动。
+                2. 明确任务 ID，提醒后续可以用同一个 Dify 应用查询。
+                3. 列出最终报告、采集来源、筛选内容等下载入口。
+                4. 如果环境检查或启动失败，直接指出原因和下一步处理建议。
+
+                新建任务结果：
+                {{#parse_started_job.summary_markdown#}}
+          context:
+            enabled: false
+            variable_selector: []
+          vision:
+            enabled: false
+        position:
+          x: 1630
+          y: 360
+        positionAbsolute:
+          x: 1630
+          y: 360
+        sourcePosition: right
+        targetPosition: left
+        width: 244
+        height: 120
+    edges:
+      - id: start-source-route_by_job_id-target
+        type: custom
+        source: start
+        target: route_by_job_id
+        sourceHandle: source
+        targetHandle: target
+        data:
+          sourceType: start
+          targetType: if-else
+          isInIteration: false
+          isInLoop: false
+      - id: route_by_job_id-has_job_id-check_existing_job-target
+        type: custom
+        source: route_by_job_id
+        target: check_existing_job
+        sourceHandle: has_job_id
+        targetHandle: target
+        data:
+          sourceType: if-else
+          targetType: http-request
+          isInIteration: false
+          isInLoop: false
+      - id: check_existing_job-source-parse_existing_job-target
+        type: custom
+        source: check_existing_job
+        target: parse_existing_job
+        sourceHandle: source
+        targetHandle: target
+        data:
+          sourceType: http-request
+          targetType: code
+          isInIteration: false
+          isInLoop: false
+      - id: parse_existing_job-source-llm_existing_job-target
+        type: custom
+        source: parse_existing_job
+        target: llm_existing_job
+        sourceHandle: source
+        targetHandle: target
+        data:
+          sourceType: code
+          targetType: llm
+          isInIteration: false
+          isInLoop: false
+      - id: llm_existing_job-source-end_existing_job-target
+        type: custom
+        source: llm_existing_job
+        target: end_existing_job
+        sourceHandle: source
+        targetHandle: target
+        data:
+          sourceType: llm
+          targetType: end
+          isInIteration: false
+          isInLoop: false
+      - id: route_by_job_id-false-check_environment-target
+        type: custom
+        source: route_by_job_id
+        target: check_environment
+        sourceHandle: "false"
+        targetHandle: target
+        data:
+          sourceType: if-else
+          targetType: http-request
+          isInIteration: false
+          isInLoop: false
+      - id: check_environment-source-start_collection_job-target
+        type: custom
+        source: check_environment
+        target: start_collection_job
+        sourceHandle: source
+        targetHandle: target
+        data:
+          sourceType: http-request
+          targetType: http-request
+          isInIteration: false
+          isInLoop: false
+      - id: start_collection_job-source-parse_started_job-target
+        type: custom
+        source: start_collection_job
+        target: parse_started_job
+        sourceHandle: source
+        targetHandle: target
+        data:
+          sourceType: http-request
+          targetType: code
+          isInIteration: false
+          isInLoop: false
+      - id: parse_started_job-source-llm_started_job-target
+        type: custom
+        source: parse_started_job
+        target: llm_started_job
+        sourceHandle: source
+        targetHandle: target
+        data:
+          sourceType: code
+          targetType: llm
+          isInIteration: false
+          isInLoop: false
+      - id: llm_started_job-source-end_started_job-target
+        type: custom
+        source: llm_started_job
+        target: end_started_job
+        sourceHandle: source
+        targetHandle: target
+        data:
+          sourceType: llm
+          targetType: end
+          isInIteration: false
+          isInLoop: false

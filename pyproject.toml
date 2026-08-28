@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "competitor-intel-harvester"
+version = "0.1.0"
+description = "Local competitor intelligence harvester with SearXNG, Crawl4AI, icrawler, Codex review, public source adapters, and local filter training."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [
+  { name = "Competitor Intel Harvester Contributors" }
+]
+keywords = ["competitive-intelligence", "product-management", "crawler", "searxng", "crawl4ai", "icrawler"]
+dependencies = [
+  "crawl4ai>=0.7.0",
+  "icrawler>=0.6.9",
+  "playwright>=1.45.0"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0"
+]
+
+[project.scripts]
+competitor-intel-harvester = "competitor_harvester:main"
+competitor-intel-ui = "app:main"
+competitor-intel-train = "train_filter_model:main"
+
+[tool.setuptools]
+py-modules = [
+  "app",
+  "competitor_harvester",
+  "filter_training",
+  "search_cards",
+  "source_adapters",
+  "structured_extractor",
+  "train_filter_model"
+]
+
+[tool.setuptools.package-data]
+"*" = ["*.md", "*.yml", "*.yaml", "*.json", "*.csv"]
