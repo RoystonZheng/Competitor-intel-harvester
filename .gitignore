@@ -30,6 +30,12 @@ training_data/review_labels.csv
 downloaded_images/
 gui_review_snapshots/
 
+# Local model checkpoints / weights
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
 # Local experiments / presentation artifacts
 15分钟实验_*/
 测试交付/
