@@ -7,8 +7,8 @@
 3. 在抓取前制定竞品发现策略和数据源策略，区分官网、垂直来源、论坛社区、App/社媒/视频和海量搜索。
 4. 用 SearXNG 搜索竞品官网、功能页、定价页、新闻、图片结果。
 5. 用 Crawl4AI 抓取重点页面，提取 Markdown、链接、图片 URL 和 PM 字段。
-6. 用 icrawler 按关键词批量下载产品图、截图、Logo 等图片。
-7. 对反爬、低文本、视频和社媒候选做公开快照复核；普通页面保存截图/文本，视频先保存公开元数据并要求时间点证据。
+6. 先下载 SearXNG 图片结果，再用 icrawler 按关键词补充产品图、截图、Logo 等图片。
+7. 对反爬、低文本、视频和社媒候选做公开快照复核；普通页面保存截图/文本，视频优先用 `yt-dlp` 保存公开元数据和时间点线索。
 8. 抽取结构化事实并做事实聚类，例如价格、重量、尺码、材质、颜色、认证、API、额度、安全等。
 9. 加载本地训练模型，给候选来源补充收录/排除/待核实分数。
 10. 调用本地 Codex CLI 做 AI 收录判断和竞品分析。
@@ -29,7 +29,7 @@ crawl4ai-setup
 python -m playwright install chromium
 ```
 
-如果你已经全局部署好了 `crawl4ai`、`icrawler`，也可以直接用对应 Python 环境运行。
+如果你已经全局部署好了 `crawl4ai`、`icrawler`，也可以直接用对应 Python 环境运行。`yt-dlp` 用于视频和部分社媒公开元数据抓取，只读取公开页面元数据，不下载视频正文。
 
 安装为可编辑包后，会得到三个命令：
 
@@ -330,6 +330,8 @@ python3 competitor_harvester.py "Gamma" --disable-search-cards
 --search-cards-dir PATH    历史搜索卡片目录，默认 search_cards/
 --disable-search-cards     不加载历史搜索卡片
 ```
+
+图片下载顺序：如果 SearXNG 已启用 `images` 分类，工具会先把图片搜索结果下载到 `downloaded_images/<竞品>/searxng/`；如果 SearXNG 没开图片分类，会在日志中提示并继续用 icrawler 关键词图片搜索兜底。
 
 ## 工作流建议
 

@@ -11,6 +11,7 @@ from competitor_harvester import (
     build_product_collection_plan,
     cluster_structured_facts,
     dedupe_results,
+    download_searxng_image_results,
     execute_gui_review_queue,
     extract_competitor_candidates_from_results,
     extract_structured_facts,
@@ -18,6 +19,7 @@ from competitor_harvester import (
     page_quality_issue,
     login_required_queue_rows,
     rows_from_manual_review_queue,
+    rows_from_images,
 )
 
 
@@ -199,6 +201,37 @@ class AdvancedIntelPipelineTest(unittest.TestCase):
             competitor_harvester.check_searxng = original_check
             competitor_harvester.crawl_with_crawl4ai = original_crawl
 
+    def test_searxng_image_results_can_be_downloaded_as_local_visual_evidence(self):
+        def fake_image_fetch(url, timeout=20, proxy_url=""):
+            return b"\x89PNG\r\n\x1a\nfake", "image/png"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            image_result = SearchResult(
+                competitor="Gamma",
+                category="images",
+                query="Gamma product screenshots",
+                title="Gamma UI screenshot",
+                url="https://images.example/gamma-ui.png",
+                snippet="SearXNG image result",
+                engine="bing",
+            )
+
+            downloaded = download_searxng_image_results(
+                [image_result],
+                out_dir,
+                max_images_per_competitor=2,
+                fetcher=fake_image_fetch,
+            )
+            rows = rows_from_images([image_result], [], downloaded)
+            downloaded_file_exists = Path(downloaded[0]["file"]).exists()
+
+        self.assertEqual(len(downloaded), 1)
+        self.assertEqual(downloaded[0]["source"], "searxng_image_download")
+        self.assertTrue(downloaded_file_exists)
+        self.assertIn("searxng", Path(downloaded[0]["file"]).parts)
+        self.assertTrue(any(row["source"] == "searxng_image_download" for row in rows))
+
     def test_gui_review_queue_captures_public_page_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
             page = Path(tmp) / "pricing.html"
@@ -230,26 +263,49 @@ class AdvancedIntelPipelineTest(unittest.TestCase):
             self.assertIn("Public pricing", Path(rows[0]["text_snapshot_path"]).read_text(encoding="utf-8"))
 
     def test_video_review_uses_public_metadata_but_requires_timestamp_evidence(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            rows = execute_gui_review_queue(
-                [
-                    {
-                        "competitor": "Gamma",
-                        "priority": "P2",
-                        "review_reason": "pre_crawl_value_candidate",
-                        "title": "Gamma official demo",
-                        "url": "https://www.youtube.com/watch?v=abc123",
-                        "domain": "youtube.com",
-                        "gui_review_url": "https://www.youtube.com/watch?v=abc123",
-                    }
-                ],
-                Path(tmp),
-                max_items=1,
-                enable_browser=False,
-            )
+        original_adapter = competitor_harvester.collect_adapter_snapshot
 
-            self.assertEqual(rows[0]["automated_review_status"], "video_metadata_pending_timestamp")
-            self.assertEqual(rows[0]["needs_manual_video_timestamp"], "yes")
+        def fake_adapter(url, **_kwargs):
+            return {
+                "adapter_name": "youtube",
+                "source_family": "video_social",
+                "platform": "YouTube",
+                "canonical_url": url,
+                "automated_review_status": "video_metadata_pending_timestamp",
+                "metadata_path": "",
+                "text_snapshot_path": "",
+                "screenshot_path": "",
+                "transcript_path": "",
+                "evidence_markers_path": "",
+                "needs_manual_video_timestamp": "yes",
+                "text_snapshot_excerpt": "",
+                "adapter_next_step": "需要补充观点出现的时间点、截图或公开字幕后，才可进入正式事实证据。",
+            }
+
+        competitor_harvester.collect_adapter_snapshot = fake_adapter
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                rows = execute_gui_review_queue(
+                    [
+                        {
+                            "competitor": "Gamma",
+                            "priority": "P2",
+                            "review_reason": "pre_crawl_value_candidate",
+                            "title": "Gamma official demo",
+                            "url": "https://www.youtube.com/watch?v=abc123",
+                            "domain": "youtube.com",
+                            "gui_review_url": "https://www.youtube.com/watch?v=abc123",
+                        }
+                    ],
+                    Path(tmp),
+                    max_items=1,
+                    enable_browser=False,
+                )
+        finally:
+            competitor_harvester.collect_adapter_snapshot = original_adapter
+
+        self.assertEqual(rows[0]["automated_review_status"], "video_metadata_pending_timestamp")
+        self.assertEqual(rows[0]["needs_manual_video_timestamp"], "yes")
 
     def test_login_page_enters_login_required_queue(self):
         page = PageExtract(
@@ -279,6 +335,42 @@ class AdvancedIntelPipelineTest(unittest.TestCase):
         self.assertEqual(manual_rows[0]["requires_user_login"], "yes")
         self.assertEqual(gui_rows[0]["automated_review_status"], "requires_user_login")
         self.assertEqual(login_rows[0]["login_assist_url"], "https://demo.example/login")
+
+    def test_login_assist_prefers_original_login_url_over_stale_browser_url(self):
+        opened_urls = []
+        original_login_snapshot = competitor_harvester.login_assisted_browser_snapshot
+
+        def fake_login_snapshot(url, *_args, **_kwargs):
+            opened_urls.append(url)
+            return "", "", "requires_user_login", "simulated login still needed"
+
+        competitor_harvester.login_assisted_browser_snapshot = fake_login_snapshot
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                rows = execute_gui_review_queue(
+                    [
+                        {
+                            "competitor": "Demo",
+                            "priority": "P0-LOGIN",
+                            "review_reason": "login_required_user_action",
+                            "requires_user_login": "yes",
+                            "title": "Demo account page",
+                            "url": "https://www.52pojie.cn/thread-2124330-1-1.html",
+                            "gui_review_url": "",
+                            "login_assist_url": "https://demo.example/login",
+                        }
+                    ],
+                    Path(tmp),
+                    max_items=1,
+                    enable_browser=False,
+                    login_assist=True,
+                )
+        finally:
+            competitor_harvester.login_assisted_browser_snapshot = original_login_snapshot
+
+        self.assertEqual(opened_urls, ["https://demo.example/login"])
+        self.assertEqual(rows[0]["url"], "https://demo.example/login")
+        self.assertEqual(rows[0]["login_assist_url"], "https://demo.example/login")
 
     def test_pre_crawl_login_result_is_not_lost(self):
         audit_row = {

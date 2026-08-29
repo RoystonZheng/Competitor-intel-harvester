@@ -19,6 +19,7 @@ from urllib.request import ProxyHandler, Request, build_opener
 
 
 FetchFn = Callable[[str, int, str], Tuple[int, str, str]]
+VideoMetadataFn = Callable[[str, int, str], Dict[str, Any]]
 
 
 def utc_stamp() -> str:
@@ -265,6 +266,150 @@ def extract_video_evidence_markers(text: str) -> List[Dict[str, Any]]:
     return markers
 
 
+def ytdlp_available() -> bool:
+    try:
+        import yt_dlp  # type: ignore  # noqa: F401
+
+        return True
+    except Exception:
+        return False
+
+
+def extract_ytdlp_metadata(url: str, timeout: int = 20, proxy_url: str = "") -> Dict[str, Any]:
+    try:
+        import yt_dlp  # type: ignore
+    except Exception as exc:
+        return {"yt_dlp_status": "not_installed", "yt_dlp_error": str(exc)}
+
+    options: Dict[str, Any] = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "noplaylist": True,
+        "socket_timeout": timeout,
+        "ignoreerrors": True,
+        "extract_flat": False,
+    }
+    if proxy_url:
+        options["proxy"] = proxy_url
+    try:
+        with yt_dlp.YoutubeDL(options) as ydl:
+            info = ydl.extract_info(url, download=False)
+        if not isinstance(info, dict):
+            return {"yt_dlp_status": "empty", "yt_dlp_error": "yt-dlp returned no metadata"}
+        info["yt_dlp_status"] = "ok"
+        return info
+    except Exception as exc:
+        return {"yt_dlp_status": "failed", "yt_dlp_error": str(exc)}
+
+
+def compact_ytdlp_fields(info: Mapping[str, Any], fallback_title: str = "") -> Dict[str, Any]:
+    subtitles = info.get("subtitles") if isinstance(info.get("subtitles"), dict) else {}
+    automatic_captions = info.get("automatic_captions") if isinstance(info.get("automatic_captions"), dict) else {}
+    chapters = info.get("chapters") if isinstance(info.get("chapters"), list) else []
+    return {
+        "yt_dlp_status": info.get("yt_dlp_status", "ok"),
+        "yt_dlp_error": info.get("yt_dlp_error", ""),
+        "video_id": info.get("id", ""),
+        "title": info.get("title") or fallback_title,
+        "uploader": info.get("uploader") or info.get("channel") or "",
+        "channel_url": info.get("channel_url") or info.get("uploader_url") or "",
+        "duration": info.get("duration", ""),
+        "upload_date": info.get("upload_date", ""),
+        "view_count": info.get("view_count", ""),
+        "like_count": info.get("like_count", ""),
+        "webpage_url": info.get("webpage_url", ""),
+        "thumbnail_url": info.get("thumbnail", ""),
+        "description": compact_text(info.get("description", ""))[:2500],
+        "chapters": chapters[:20],
+        "tags": info.get("tags", [])[:20] if isinstance(info.get("tags"), list) else [],
+        "categories": info.get("categories", [])[:10] if isinstance(info.get("categories"), list) else [],
+        "subtitles": sorted(subtitles.keys())[:20],
+        "automatic_captions": sorted(automatic_captions.keys())[:20],
+    }
+
+
+def chapter_markers(chapters: Any) -> List[Dict[str, Any]]:
+    markers: List[Dict[str, Any]] = []
+    seen = set()
+    if not isinstance(chapters, list):
+        return markers
+    for chapter in chapters:
+        if not isinstance(chapter, Mapping):
+            continue
+        start = chapter.get("start_time")
+        if start is None:
+            continue
+        try:
+            seconds = int(float(start))
+        except (TypeError, ValueError):
+            continue
+        if seconds in seen:
+            continue
+        seen.add(seconds)
+        markers.append(
+            {
+                "timestamp": format_timestamp(seconds),
+                "timestamp_seconds": seconds,
+                "context": compact_text(chapter.get("title") or "chapter marker"),
+            }
+        )
+    return markers
+
+
+def merge_video_markers(*marker_groups: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    seen = set()
+    for group in marker_groups:
+        for marker in group:
+            seconds = marker.get("timestamp_seconds")
+            if seconds is None:
+                continue
+            try:
+                key = int(seconds)
+            except (TypeError, ValueError):
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(
+                {
+                    "timestamp": textify(marker.get("timestamp")) or format_timestamp(key),
+                    "timestamp_seconds": key,
+                    "context": compact_text(marker.get("context")),
+                }
+            )
+    return sorted(merged, key=lambda item: int(item.get("timestamp_seconds") or 0))
+
+
+def write_video_evidence_file(path: Path, fields: Mapping[str, Any], markers: Sequence[Mapping[str, Any]]) -> str:
+    lines = [
+        "Video evidence metadata",
+        f"Title: {fields.get('title', '')}",
+        f"Uploader: {fields.get('uploader', '')}",
+        f"URL: {fields.get('webpage_url', '')}",
+        f"Duration: {fields.get('duration', '')}",
+        f"Thumbnail: {fields.get('thumbnail_url', '')}",
+        "",
+        "Description:",
+        textify(fields.get("description", "")),
+        "",
+        "Markers:",
+    ]
+    for marker in markers:
+        lines.append(f"- {marker.get('timestamp')}: {marker.get('context')}")
+    lines += [
+        "",
+        "Subtitle availability:",
+        f"- subtitles: {', '.join(fields.get('subtitles') or [])}",
+        f"- automatic_captions: {', '.join(fields.get('automatic_captions') or [])}",
+        "",
+        "Note: this file stores public metadata only; it is not a downloaded video.",
+    ]
+    path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+    return str(path)
+
+
 def write_text_snapshot(path: Path, sections: Mapping[str, Any]) -> str:
     lines = []
     for key, value in sections.items():
@@ -314,6 +459,7 @@ def collect_adapter_snapshot(
     out_dir: Union[Path, str] = ".",
     slug: str = "source",
     fetcher: Optional[FetchFn] = None,
+    video_metadata_extractor: Optional[VideoMetadataFn] = None,
     timeout: int = 12,
     proxy_url: str = "",
 ) -> Dict[str, Any]:
@@ -348,21 +494,42 @@ def collect_adapter_snapshot(
         adapter = result["adapter_name"]
         if adapter == "youtube":
             video_id = youtube_video_id(url)
-            oembed_url = "https://www.youtube.com/oembed?" + urlencode({"url": url, "format": "json"})
-            status, content_type, body = fetch(oembed_url, timeout, proxy_url)
-            payload = json_payload(content_type, body)
-            metadata["fields"].update(
-                {
-                    "video_id": video_id,
-                    "oembed_status": status,
-                    "title": payload.get("title") or title,
-                    "author_name": payload.get("author_name", ""),
-                    "thumbnail_url": payload.get("thumbnail_url", ""),
-                }
-            )
-            text_sections.update(metadata["fields"])
-            marker_context = " ".join([url, title, snippet, payload.get("title", ""), payload.get("author_name", "")])
-            markers = extract_video_evidence_markers(marker_context)
+            ytdlp_extract = video_metadata_extractor or extract_ytdlp_metadata
+            ytdlp_info = ytdlp_extract(url, timeout, proxy_url)
+            markers: List[Dict[str, Any]] = []
+            if ytdlp_info.get("yt_dlp_status", "ok") == "ok":
+                fields = compact_ytdlp_fields(ytdlp_info, title)
+                fields["video_id"] = fields.get("video_id") or video_id
+                metadata["fields"].update(fields)
+                text_sections.update(fields)
+                markers = merge_video_markers(
+                    chapter_markers(ytdlp_info.get("chapters")),
+                    extract_video_evidence_markers(" ".join([url, title, snippet, fields.get("title", ""), fields.get("description", "")])),
+                )
+                transcript_path = snapshot_dir / f"{slug}-video-evidence.txt"
+                result["transcript_path"] = write_video_evidence_file(transcript_path, fields, markers)
+            else:
+                metadata["fields"].update(
+                    {
+                        "yt_dlp_status": ytdlp_info.get("yt_dlp_status", "failed"),
+                        "yt_dlp_error": ytdlp_info.get("yt_dlp_error", ""),
+                    }
+                )
+                oembed_url = "https://www.youtube.com/oembed?" + urlencode({"url": url, "format": "json"})
+                status, content_type, body = fetch(oembed_url, timeout, proxy_url)
+                payload = json_payload(content_type, body)
+                metadata["fields"].update(
+                    {
+                        "video_id": video_id,
+                        "oembed_status": status,
+                        "title": payload.get("title") or title,
+                        "author_name": payload.get("author_name", ""),
+                        "thumbnail_url": payload.get("thumbnail_url", ""),
+                    }
+                )
+                text_sections.update(metadata["fields"])
+                marker_context = " ".join([url, title, snippet, payload.get("title", ""), payload.get("author_name", "")])
+                markers = extract_video_evidence_markers(marker_context)
             if markers:
                 markers_path = snapshot_dir / f"{slug}-video-markers.json"
                 markers_path.write_text(json.dumps(markers, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -414,29 +581,63 @@ def collect_adapter_snapshot(
             text_sections.update(metadata["fields"])
             result["adapter_next_step"] = "已保存 GitHub 公开仓库元数据；可用于开源活跃度、开发者生态和技术接口验证。"
         else:
-            status, content_type, body = fetch(url, timeout, proxy_url)
-            payload = json_payload(content_type, body)
-            og = extract_open_graph(body) if body else {}
-            html_title, html_text, html_images = strip_html_snapshot(body) if body and "html" in content_type.lower() else ("", compact_text(body)[:6000], [])
-            metadata["fields"].update(
-                {
-                    "fetch_status": status,
-                    "open_graph": og,
-                    "html_title": html_title,
-                    "image_urls": html_images,
-                    "body_excerpt": html_text[:1200],
-                    "json_payload_keys": sorted(payload.keys())[:40] if payload else [],
-                }
-            )
-            text_sections.update({"OpenGraph": og, "HTML title": html_title, "Body": html_text[:3000], "Images": html_images})
+            adapter_handled = False
             if result["source_family"] == "video_social":
-                markers = extract_video_evidence_markers(" ".join([url, title, snippet, html_text]))
-                if markers:
-                    markers_path = snapshot_dir / f"{slug}-video-markers.json"
-                    markers_path.write_text(json.dumps(markers, ensure_ascii=False, indent=2), encoding="utf-8")
-                    result["evidence_markers_path"] = str(markers_path)
-                result["needs_manual_video_timestamp"] = "no" if markers else "yes"
-            result["adapter_next_step"] = "已保存该平台公开页面元数据；进入强事实前需核对原始公开页面和时间/作者/截图。"
+                ytdlp_extract = video_metadata_extractor or extract_ytdlp_metadata
+                ytdlp_info = ytdlp_extract(url, timeout, proxy_url)
+                if ytdlp_info.get("yt_dlp_status", "ok") == "ok":
+                    fields = compact_ytdlp_fields(ytdlp_info, title)
+                    metadata["fields"].update(fields)
+                    text_sections.update(fields)
+                    markers = merge_video_markers(
+                        chapter_markers(ytdlp_info.get("chapters")),
+                        extract_video_evidence_markers(" ".join([url, title, snippet, fields.get("title", ""), fields.get("description", "")])),
+                    )
+                    if markers:
+                        markers_path = snapshot_dir / f"{slug}-video-markers.json"
+                        markers_path.write_text(json.dumps(markers, ensure_ascii=False, indent=2), encoding="utf-8")
+                        result["evidence_markers_path"] = str(markers_path)
+                    transcript_path = snapshot_dir / f"{slug}-video-evidence.txt"
+                    result["transcript_path"] = write_video_evidence_file(transcript_path, fields, markers)
+                    result["needs_manual_video_timestamp"] = "no" if markers else "yes"
+                    result["adapter_next_step"] = (
+                        "yt-dlp 已保存公开视频元数据和时间点线索；进入报告前仍建议核对公开画面或字幕。"
+                        if markers
+                        else "yt-dlp 已保存公开视频元数据，但缺少观点时间点；需要人工补时间点、截图或公开字幕。"
+                    )
+                    result["automated_review_status"] = "adapter_metadata_captured"
+                    adapter_handled = True
+                else:
+                    metadata["fields"].update(
+                        {
+                            "yt_dlp_status": ytdlp_info.get("yt_dlp_status", "failed"),
+                            "yt_dlp_error": ytdlp_info.get("yt_dlp_error", ""),
+                        }
+                    )
+            if not adapter_handled:
+                status, content_type, body = fetch(url, timeout, proxy_url)
+                payload = json_payload(content_type, body)
+                og = extract_open_graph(body) if body else {}
+                html_title, html_text, html_images = strip_html_snapshot(body) if body and "html" in content_type.lower() else ("", compact_text(body)[:6000], [])
+                metadata["fields"].update(
+                    {
+                        "fetch_status": status,
+                        "open_graph": og,
+                        "html_title": html_title,
+                        "image_urls": html_images,
+                        "body_excerpt": html_text[:1200],
+                        "json_payload_keys": sorted(payload.keys())[:40] if payload else [],
+                    }
+                )
+                text_sections.update({"OpenGraph": og, "HTML title": html_title, "Body": html_text[:3000], "Images": html_images})
+                if result["source_family"] == "video_social":
+                    markers = extract_video_evidence_markers(" ".join([url, title, snippet, html_text]))
+                    if markers:
+                        markers_path = snapshot_dir / f"{slug}-video-markers.json"
+                        markers_path.write_text(json.dumps(markers, ensure_ascii=False, indent=2), encoding="utf-8")
+                        result["evidence_markers_path"] = str(markers_path)
+                    result["needs_manual_video_timestamp"] = "no" if markers else "yes"
+                result["adapter_next_step"] = "已保存该平台公开页面元数据；进入强事实前需核对原始公开页面和时间/作者/截图。"
     except Exception as exc:
         metadata["error"] = str(exc)
         result["automated_review_status"] = "adapter_metadata_failed"

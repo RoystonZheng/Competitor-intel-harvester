@@ -1,3 +1,4 @@
 crawl4ai>=0.7.0
 icrawler>=0.6.9
 playwright>=1.45.0
+yt-dlp>=2024.8.6

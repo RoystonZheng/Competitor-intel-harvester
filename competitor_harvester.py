@@ -4634,6 +4634,101 @@ def crawl_keyword_images(
     return downloaded
 
 
+def default_binary_fetch(url: str, timeout: int = 20, proxy_url: str = "") -> Tuple[bytes, str]:
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "competitor-intel-harvester/1.0",
+            "Accept": "image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8",
+        },
+    )
+    if proxy_url and not is_local_url(url):
+        opener = build_opener(ProxyHandler({"http": proxy_url, "https": proxy_url}))
+    else:
+        opener = build_opener(ProxyHandler({}))
+    with opener.open(request, timeout=timeout) as response:
+        content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
+        data = response.read(8_000_000)
+    return data, content_type
+
+
+def image_extension(content_type: str, url: str) -> str:
+    parsed_suffix = Path(urlparse(url).path).suffix.lower()
+    if parsed_suffix in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif", ".bmp"}:
+        return ".jpg" if parsed_suffix == ".jpeg" else parsed_suffix
+    guessed = mimetypes.guess_extension(content_type or "")
+    if guessed in {".jpe", ".jpeg"}:
+        return ".jpg"
+    if guessed in {".jpg", ".png", ".webp", ".gif", ".avif", ".bmp"}:
+        return guessed
+    return ".jpg"
+
+
+def looks_like_image_bytes(data: bytes, content_type: str) -> bool:
+    if content_type.startswith("image/"):
+        return True
+    signatures = (
+        b"\xff\xd8\xff",
+        b"\x89PNG\r\n\x1a\n",
+        b"GIF87a",
+        b"GIF89a",
+        b"RIFF",
+    )
+    return any(data.startswith(signature) for signature in signatures)
+
+
+def download_searxng_image_results(
+    image_results: Sequence[SearchResult],
+    out_dir: Path,
+    max_images_per_competitor: int,
+    proxy_url: str = "",
+    timeout: int = 20,
+    fetcher: Optional[Any] = None,
+) -> List[Dict[str, str]]:
+    if max_images_per_competitor <= 0:
+        return []
+    fetch = fetcher or default_binary_fetch
+    downloaded: List[Dict[str, str]] = []
+    seen_urls = set()
+    counts: Dict[str, int] = {}
+    image_root = out_dir / "downloaded_images"
+    image_root.mkdir(parents=True, exist_ok=True)
+
+    for item in image_results:
+        if not item.url or item.url in seen_urls:
+            continue
+        competitor = item.competitor or "unknown"
+        if counts.get(competitor, 0) >= max_images_per_competitor:
+            continue
+        seen_urls.add(item.url)
+        comp_dir = image_root / slugify(competitor) / "searxng"
+        comp_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            data, content_type = fetch(item.url, timeout, proxy_url)
+            if not data or not looks_like_image_bytes(data, content_type):
+                continue
+            counts[competitor] = counts.get(competitor, 0) + 1
+            extension = image_extension(content_type, item.url)
+            file_path = comp_dir / f"{counts[competitor]:06d}{extension}"
+            file_path.write_bytes(data)
+            downloaded.append(
+                {
+                    "competitor": competitor,
+                    "query": item.query,
+                    "engine": item.engine,
+                    "file": str(file_path),
+                    "source": "searxng_image_download",
+                    "image_url": item.url,
+                    "title": item.title,
+                    "page_url": "",
+                }
+            )
+        except Exception as exc:
+            print(f"[warn] SearXNG image download failed for {item.url}: {exc}", file=sys.stderr)
+
+    return downloaded
+
+
 def choose_urls_to_crawl(
     web_results: Sequence[SearchResult],
     max_pages_per_competitor: int,
@@ -5045,6 +5140,32 @@ def audit_requires_user_login(row: Mapping[str, Any]) -> bool:
     if is_login_required_error(hard_gate):
         return True
     return looks_like_login_form(textify(row.get("url")), textify(row.get("title")), haystack)
+
+
+def row_requires_login_action(row: Mapping[str, Any]) -> bool:
+    status = textify(row.get("automated_review_status")).lower()
+    hard_gate = textify(row.get("hard_gate") or row.get("rejection_code")).lower()
+    return (
+        textify(row.get("requires_user_login")).lower() == "yes"
+        or textify(row.get("review_reason")) == "login_required_user_action"
+        or textify(row.get("page_role")) == "auth_or_account_shell"
+        or status in {"requires_user_login", "login_assisted_snapshot_captured", "login_assist_still_requires_login"}
+        or status.startswith("login_assist")
+        or "auth_or_transaction_shell" in hard_gate
+    )
+
+
+def review_target_url(row: Mapping[str, Any]) -> str:
+    keys = (
+        ("login_assist_url", "gui_review_url", "url", "url_or_path")
+        if row_requires_login_action(row)
+        else ("gui_review_url", "url", "url_or_path", "login_assist_url")
+    )
+    for key in keys:
+        value = textify(row.get(key))
+        if value:
+            return value
+    return ""
 
 
 def login_review_next_step() -> str:
@@ -5566,9 +5687,9 @@ def execute_gui_review_queue(
     (out_dir / "gui_review_snapshots").mkdir(parents=True, exist_ok=True)
     rows: List[Dict[str, Any]] = []
     for idx, row in enumerate(manual_review_rows[: max(0, max_items)], start=1):
-        url = textify(row.get("gui_review_url") or row.get("url"))
+        url = review_target_url(row)
         slug = f"{idx:03d}-{slugify(textify(row.get('competitor')) or domain_of(url) or 'review')}"
-        requires_login = textify(row.get("requires_user_login")).lower() == "yes" or textify(row.get("review_reason")) == "login_required_user_action"
+        requires_login = row_requires_login_action(row)
         result = {
             "competitor": textify(row.get("competitor")),
             "priority": textify(row.get("priority")),
@@ -5576,7 +5697,7 @@ def execute_gui_review_queue(
             "requires_user_login": "yes" if requires_login else "no",
             "title": textify(row.get("title")),
             "url": url,
-            "domain": textify(row.get("domain")) or domain_of(url),
+            "domain": domain_of(url) or textify(row.get("domain")),
             "adapter_name": "",
             "source_family": "",
             "platform": "",
@@ -5588,7 +5709,7 @@ def execute_gui_review_queue(
             "transcript_path": "",
             "evidence_markers_path": "",
             "needs_manual_video_timestamp": "no",
-            "login_assist_url": textify(row.get("login_assist_url")) or (url if requires_login else ""),
+            "login_assist_url": url if requires_login else textify(row.get("login_assist_url")),
             "text_snapshot_excerpt": "",
             "allowed_boundary": login_review_allowed_boundary()
             if requires_login
@@ -5779,15 +5900,16 @@ def login_required_queue_rows(
     gui_review_rows: Sequence[Mapping[str, Any]],
 ) -> List[Dict[str, Any]]:
     gui_by_key = {
-        (textify(row.get("competitor")), textify(row.get("url"))): row
+        (textify(row.get("competitor")), review_target_url(row)): row
         for row in gui_review_rows
     }
     rows: List[Dict[str, Any]] = []
     seen = set()
     for row in manual_review_rows:
-        if textify(row.get("requires_user_login")).lower() != "yes" and textify(row.get("review_reason")) != "login_required_user_action":
+        if not row_requires_login_action(row):
             continue
-        key = (textify(row.get("competitor")), textify(row.get("url")))
+        target_url = review_target_url(row)
+        key = (textify(row.get("competitor")), target_url)
         if key in seen:
             continue
         seen.add(key)
@@ -5799,8 +5921,8 @@ def login_required_queue_rows(
                 "review_reason": textify(row.get("review_reason")) or "login_required_user_action",
                 "title": textify(row.get("title")),
                 "url": key[1],
-                "domain": textify(row.get("domain")) or domain_of(key[1]),
-                "login_assist_url": textify(row.get("login_assist_url")) or key[1],
+                "domain": domain_of(key[1]) or textify(row.get("domain")),
+                "login_assist_url": key[1],
                 "automated_review_status": textify(gui.get("automated_review_status")) or "requires_user_login",
                 "text_snapshot_path": textify(gui.get("text_snapshot_path")),
                 "screenshot_path": textify(gui.get("screenshot_path")),
@@ -5930,10 +6052,10 @@ def build_problem_review_rows(
     seen: set[Tuple[str, str, str]] = set()
 
     def add(source_queue: str, raw: Mapping[str, Any], status: str = "", reason: str = "") -> None:
-        url = textify(raw.get("url") or raw.get("gui_review_url") or raw.get("url_or_path") or raw.get("login_assist_url"))
+        url = review_target_url(raw)
         competitor = textify(raw.get("competitor"))
-        domain = textify(raw.get("domain")) or domain_of(url)
-        requires_login = "yes" if textify(raw.get("requires_user_login")).lower() == "yes" else "no"
+        domain = domain_of(url) or textify(raw.get("domain"))
+        requires_login = "yes" if row_requires_login_action(raw) else "no"
         needs_video_timestamp = "yes" if textify(raw.get("needs_manual_video_timestamp")).lower() == "yes" else "no"
         status_text = status or textify(raw.get("automated_review_status") or raw.get("review_reason") or raw.get("hard_gate") or raw.get("status"))
         reason_text = reason or textify(raw.get("reason") or raw.get("verification_reason") or raw.get("crawl_error") or raw.get("next_step") or raw.get("suggested_next_step"))
@@ -6567,10 +6689,10 @@ def rows_from_images(
         rows.append(
             {
                 "competitor": item.get("competitor", ""),
-                "source": "icrawler_download",
-                "image_url": "",
-                "page_url": "",
-                "title": "",
+                "source": item.get("source", "icrawler_download"),
+                "image_url": item.get("image_url", ""),
+                "page_url": item.get("page_url", ""),
+                "title": item.get("title", ""),
                 "query": item.get("query", ""),
                 "local_file": item.get("file", ""),
             }
@@ -6742,10 +6864,11 @@ def rows_from_all_sources(
 
     for item in downloaded:
         local_file = item.get("file", "")
+        source = item.get("source", "icrawler_download")
         rows.append(
             {
                 "competitor": item.get("competitor", ""),
-                "source_stage": "icrawler",
+                "source_stage": "searxng_images" if source == "searxng_image_download" else "icrawler",
                 "source_type": "downloaded_image",
                 "source_status": "downloaded",
                 "selected_for_crawl": "no",
@@ -6772,14 +6895,14 @@ def rows_from_all_sources(
                 "ml_adjustment": "",
                 "ml_reason": "图片候选暂不进入文本筛选模型",
                 "ml_model_version": "",
-                "title": "",
+                "title": item.get("title", ""),
                 "url_or_path": local_file,
                 "domain": "",
                 "query": item.get("query", ""),
                 "engine": item.get("engine", ""),
                 "score": "",
                 "content_preview": Path(local_file).name if local_file else "",
-                "reason": "downloaded by icrawler keyword image search",
+                "reason": "downloaded from SearXNG image result" if source == "searxng_image_download" else "downloaded by icrawler keyword image search",
             }
         )
 
@@ -9351,9 +9474,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     downloaded_images: List[Dict[str, str]] = []
     if args.skip_images:
-        print("[3/5] Skipping icrawler image downloads.")
+        print("[3/5] Skipping image downloads.")
     else:
-        print(f"[3/5] Downloading keyword images with icrawler ({args.image_engine}) ...")
+        print("[3/5] Downloading visual evidence ...")
+        searxng_downloaded = download_searxng_image_results(
+            image_results,
+            out_dir,
+            max_images_per_competitor=args.max_image_downloads,
+            proxy_url=args.proxy_url,
+            timeout=args.timeout,
+        )
+        downloaded_images.extend(searxng_downloaded)
+        print(f"      SearXNG downloaded images: {len(searxng_downloaded)}")
+        print(f"      keyword images with icrawler ({args.image_engine}) ...")
         extra_terms = unique_strings(
             [
                 *(args.image_extra_term or ["product", "screenshot", "UI"]),
@@ -9362,7 +9495,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 *manual_include_keywords[:10],
             ]
         )
-        downloaded_images = crawl_keyword_images(
+        icrawler_images = crawl_keyword_images(
             competitors=competitors,
             out_dir=out_dir,
             max_images=args.max_image_downloads,
@@ -9370,7 +9503,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             extra_terms=extra_terms,
             proxy_url=args.proxy_url,
         )
-        print(f"      downloaded images: {len(downloaded_images)}")
+        downloaded_images.extend(icrawler_images)
+        print(f"      icrawler downloaded images: {len(icrawler_images)}")
+        print(f"      downloaded images total: {len(downloaded_images)}")
 
     print("[4/5] Exporting CSV/JSON/Markdown ...")
     image_rows = rows_from_images(image_results, pages, downloaded_images)

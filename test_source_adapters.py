@@ -48,6 +48,7 @@ class SourceAdaptersTest(unittest.TestCase):
                 out_dir=Path(tmp),
                 slug="yt",
                 fetcher=fake_fetch,
+                video_metadata_extractor=lambda *_args, **_kwargs: {"yt_dlp_status": "not_installed", "yt_dlp_error": "test"},
             )
             markers = json.loads(Path(result["evidence_markers_path"]).read_text(encoding="utf-8"))
 
@@ -56,6 +57,42 @@ class SourceAdaptersTest(unittest.TestCase):
         self.assertEqual(result["needs_manual_video_timestamp"], "no")
         self.assertEqual(markers[0]["timestamp_seconds"], 75)
         self.assertIn("Gamma demo", result["text_snapshot_excerpt"])
+
+    def test_video_adapter_prefers_ytdlp_metadata_and_chapter_markers(self):
+        def fake_ytdlp(url, timeout=12, proxy_url=""):
+            return {
+                "id": "abc123",
+                "title": "Gamma product walkthrough",
+                "uploader": "Gamma",
+                "duration": 180,
+                "webpage_url": url,
+                "thumbnail": "https://img.example/thumb.jpg",
+                "description": "00:42 pricing packages. 01:20 export and collaboration.",
+                "chapters": [{"start_time": 42, "title": "Pricing packages"}],
+                "subtitles": {"en": [{"ext": "vtt", "url": "https://video.example/subs.vtt"}]},
+                "automatic_captions": {"zh": [{"ext": "vtt", "url": "https://video.example/zh.vtt"}]},
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = collect_adapter_snapshot(
+                url="https://www.youtube.com/watch?v=abc123",
+                title="Gamma walkthrough",
+                snippet="",
+                out_dir=Path(tmp),
+                slug="yt-dlp",
+                fetcher=lambda *_args, **_kwargs: self.fail("yt-dlp metadata should avoid oEmbed fetch"),
+                video_metadata_extractor=fake_ytdlp,
+            )
+            metadata = json.loads(Path(result["metadata_path"]).read_text(encoding="utf-8"))
+            markers = json.loads(Path(result["evidence_markers_path"]).read_text(encoding="utf-8"))
+            transcript_text = Path(result["transcript_path"]).read_text(encoding="utf-8")
+
+        self.assertEqual(metadata["fields"]["yt_dlp_status"], "ok")
+        self.assertEqual(metadata["fields"]["duration"], 180)
+        self.assertEqual(result["needs_manual_video_timestamp"], "no")
+        self.assertIn({"timestamp": "00:42", "timestamp_seconds": 42, "context": "Pricing packages"}, markers)
+        self.assertIn("00:42 pricing packages", transcript_text)
+        self.assertIn("automatic_captions", transcript_text)
 
     def test_app_store_snapshot_uses_public_lookup_metadata(self):
         def fake_fetch(url, timeout=12, proxy_url=""):

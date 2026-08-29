@@ -23,6 +23,7 @@ class PackagingConfigTest(unittest.TestCase):
         self.assertIn("crawl4ai", requirements)
         self.assertIn("icrawler", requirements)
         self.assertIn("playwright", requirements)
+        self.assertIn("yt-dlp", requirements)
 
     def test_env_example_documents_local_model_and_source_services(self):
         text = (ROOT / ".env.example").read_text(encoding="utf-8")
