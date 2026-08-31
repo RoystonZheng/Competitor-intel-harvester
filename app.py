@@ -1292,6 +1292,193 @@ LOGIN_POOL_EXCLUDE_HINTS = {
     "简历",
 }
 
+LOGIN_AUTH_HOST_LABELS = {
+    "account",
+    "accounts",
+    "auth",
+    "id",
+    "login",
+    "member",
+    "oauth",
+    "passport",
+    "sso",
+}
+
+LOGIN_AUTH_URL_TOKENS = {
+    "login",
+    "log-in",
+    "signin",
+    "sign-in",
+    "signup",
+    "sign-up",
+    "register",
+    "registration",
+    "account",
+    "accounts",
+    "auth",
+    "oauth",
+    "passport",
+    "member",
+    "usercenter",
+    "sso",
+}
+
+LOGIN_AUTH_URL_NOISE_TOKENS = {
+    "article",
+    "articles",
+    "author",
+    "authors",
+    "blog",
+    "blogs",
+    "download",
+    "downloads",
+    "faq",
+    "faqs",
+    "guide",
+    "guides",
+    "news",
+    "post",
+    "posts",
+    "press",
+    "review",
+    "reviews",
+    "story",
+    "stories",
+    "alternatives",
+    "comparison",
+}
+
+LOGIN_AUTH_TITLE_TERMS = {
+    "login",
+    "log in",
+    "sign in",
+    "signin",
+    "sign-in",
+    "signup",
+    "sign up",
+    "sign-up",
+    "register",
+    "registration",
+    "auth",
+    "oauth",
+    "passport",
+    "account",
+    "password",
+    "forgot password",
+    "登录",
+    "登陆",
+    "注册",
+    "账号",
+    "账户",
+    "密码",
+    "验证码",
+}
+
+LOGIN_AUTH_TITLE_NOISE_TERMS = {
+    "review",
+    "reviews",
+    "download",
+    "downloads",
+    "faq",
+    "faqs",
+    "guide",
+    "guides",
+    "article",
+    "articles",
+    "author",
+    "authors",
+    "blog",
+    "blogs",
+    "news",
+    "comparison",
+    "alternatives",
+    "experience",
+    "评测",
+    "评价",
+    "下载",
+    "教程",
+    "指南",
+    "作者",
+    "新闻",
+    "文章",
+}
+
+LOGIN_AUTH_MARKER_RE = re.compile(
+    r"(?<![a-z0-9])("
+    r"log\s*in|sign\s*in|signin|sign-in|"
+    r"sign\s*up|signup|sign-up|login|register|registration|"
+    r"oauth|passport|account|accounts|password|captcha"
+    r")(?![a-z0-9])",
+    re.I,
+)
+
+LOGIN_AUTH_FORM_TERMS = {
+    "password",
+    "forgot password",
+    "verification code",
+    "captcha",
+    "one-time code",
+    "email address",
+    "手机号",
+    "密码",
+    "验证码",
+    "登录后",
+    "注册账号",
+}
+
+
+def login_url_has_auth_gate_path(url: str) -> bool:
+    parsed = urlparse(url or "")
+    host = (parsed.hostname or "").lower()
+    first_label = host.split(".", 1)[0] if host else ""
+    if first_label in LOGIN_AUTH_HOST_LABELS:
+        return True
+    for segment in (parsed.path or "").lower().split("/"):
+        compact = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", segment).strip()
+        if not compact:
+            continue
+        tokens = set(compact.split())
+        has_noise = bool(tokens & LOGIN_AUTH_URL_NOISE_TOKENS)
+        if compact.replace(" ", "-") in LOGIN_AUTH_URL_TOKENS and not has_noise:
+            return True
+        if tokens & LOGIN_AUTH_URL_TOKENS and len(tokens) <= 3 and not has_noise:
+            return True
+    return False
+
+
+def login_title_is_auth_gate(title: str) -> bool:
+    cleaned = re.sub(r"\s+", " ", title or "").strip()
+    if not cleaned or len(cleaned) > 140:
+        return False
+    chunks = [cleaned, *re.split(r"[|:：/·\-–—]+", cleaned)]
+    for chunk in chunks:
+        low = chunk.strip().lower()
+        if not low:
+            continue
+        if any(term in low for term in LOGIN_AUTH_TITLE_NOISE_TERMS):
+            continue
+        word_count = len(re.findall(r"[a-z0-9]+", low))
+        has_english_login = bool(LOGIN_AUTH_MARKER_RE.search(low))
+        has_chinese_login = any(token in low for token in ("登录", "登陆", "注册", "账号登录", "账户登录", "密码登录"))
+        if has_english_login and 0 < word_count <= 5:
+            return True
+        if has_chinese_login and len(low) <= 30:
+            return True
+    return False
+
+
+def login_row_is_actual_auth_gate(url: str, title: str = "", source_text: str = "") -> bool:
+    haystack = f"{url}\n{title}\n{source_text}".lower()
+    has_auth_marker = bool(
+        LOGIN_AUTH_MARKER_RE.search(haystack)
+        or any(token in haystack for token in ("登录", "登陆", "注册", "账号", "账户", "密码", "验证码", "请登录"))
+    )
+    if not has_auth_marker:
+        return False
+    if login_url_has_auth_gate_path(url) or login_title_is_auth_gate(title):
+        return True
+    return any(term in haystack for term in LOGIN_AUTH_FORM_TERMS)
+
 
 def login_row_has_strong_binding(competitor: str, url: str, title: str = "") -> bool:
     competitor = (competitor or "").strip().lower()
@@ -1387,6 +1574,12 @@ def load_login_required_reviews(out_dir: Path, limit: int = 200) -> List[dict]:
                     if login_request_marker_exists(out_dir, key[0], url, "skip"):
                         continue
                     if not login_row_has_strong_binding(key[0], url, row.get("title") or ""):
+                        continue
+                    source_text = "\n".join(
+                        str(row.get(key) or "")
+                        for key in ("crawl_error", "cleaned_excerpt_sample", "text_snapshot_excerpt", "reason")
+                    )
+                    if not login_row_is_actual_auth_gate(url, row.get("title") or "", source_text):
                         continue
                     seen.add(key)
                     rows.append(

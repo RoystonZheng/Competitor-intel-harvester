@@ -704,6 +704,114 @@ LOGIN_FORM_TERMS = (
     "注册账号",
 )
 
+AUTH_GATE_HOST_LABELS = {
+    "account",
+    "accounts",
+    "auth",
+    "id",
+    "login",
+    "member",
+    "oauth",
+    "passport",
+    "sso",
+}
+
+AUTH_GATE_URL_TOKENS = (
+    "login",
+    "log-in",
+    "signin",
+    "sign-in",
+    "signup",
+    "sign-up",
+    "register",
+    "registration",
+    "account",
+    "accounts",
+    "auth",
+    "oauth",
+    "passport",
+    "member",
+    "usercenter",
+    "sso",
+)
+
+AUTH_GATE_URL_NOISE_TOKENS = {
+    "article",
+    "articles",
+    "author",
+    "authors",
+    "blog",
+    "blogs",
+    "download",
+    "downloads",
+    "faq",
+    "faqs",
+    "guide",
+    "guides",
+    "news",
+    "post",
+    "posts",
+    "press",
+    "review",
+    "reviews",
+    "story",
+    "stories",
+    "alternatives",
+    "comparison",
+}
+
+AUTH_GATE_TITLE_NOISE_TERMS = (
+    "review",
+    "reviews",
+    "download",
+    "downloads",
+    "faq",
+    "faqs",
+    "guide",
+    "guides",
+    "article",
+    "articles",
+    "author",
+    "authors",
+    "blog",
+    "blogs",
+    "news",
+    "comparison",
+    "alternatives",
+    "experience",
+    "评测",
+    "评价",
+    "下载",
+    "教程",
+    "指南",
+    "作者",
+    "新闻",
+    "文章",
+)
+
+AUTH_LOGIN_MARKER_RE = re.compile(
+    r"(?<![a-z0-9])("
+    r"log\s*in|sign\s*in|signin|sign-in|"
+    r"sign\s*up|signup|sign-up|login|register|registration|"
+    r"oauth|passport|account|accounts|password|captcha"
+    r")(?![a-z0-9])",
+    re.I,
+)
+
+AUTH_FORM_FIELD_TERMS = (
+    "password",
+    "forgot password",
+    "verification code",
+    "captcha",
+    "one-time code",
+    "email address",
+    "手机号",
+    "密码",
+    "验证码",
+    "登录后",
+    "注册账号",
+)
+
 LOGIN_ASSIST_VALUE_TERMS = (
     "pricing",
     "plans",
@@ -3000,7 +3108,7 @@ def page_role_for_result(
     domain = domain_of(item.url)
     if not is_probably_html_page(item.url):
         return "asset_or_download"
-    if any(token in haystack for token in ("login", "signin", "sign in", "signup", "register", "auth", "账号", "登录", "注册")):
+    if login_gate_confirmed_by_url_title_or_form(item.url, item.title, item.snippet):
         return "auth_or_account_shell"
     if any(token in haystack for token in ("cart", "checkout", "coupon", "已买到的宝贝", "购物车", "卖家中心", "开店")):
         return "transaction_or_marketplace_shell"
@@ -4640,6 +4748,8 @@ def clean_text(markdown: str, limit: int = 1200) -> str:
 
 
 def auth_or_transaction_shell_dominates(
+    url: str,
+    title: str,
     evidence_haystack: str,
     cleaned_text: str,
     field_hits: Sequence[str],
@@ -4678,6 +4788,8 @@ def auth_or_transaction_shell_dominates(
     )
     if transaction_hits and not field_hits and len(cleaned_text) < 2000:
         return True
+    if auth_hits and not login_gate_confirmed_by_url_title_or_form(url, title, evidence_haystack):
+        return False
     if auth_hits and re.search(r"(请输入|验证码|手机号|password|forgot password|登录后|注册账号)", low) and not field_hits:
         return True
     if auth_hits and not (field_hits or include_hits or len(product_hits) >= 2) and len(cleaned_text) < 1600:
@@ -4710,7 +4822,7 @@ def page_quality_issue(
 
     if manual_exclude_hits:
         return "rejected_manual_exclude_keyword:" + ",".join(manual_exclude_hits[:5])
-    if plan_exclude_hits and auth_or_transaction_shell_dominates(evidence_haystack, cleaned, field_hits, include_hits):
+    if plan_exclude_hits and auth_or_transaction_shell_dominates(url, title, evidence_haystack, cleaned, field_hits, include_hits):
         return "rejected_auth_or_transaction_shell:" + ",".join(plan_exclude_hits[:5])
     if any(pattern.search(broken_haystack) for pattern in BROKEN_PAGE_PATTERNS):
         return "rejected_broken_or_404_page"
@@ -5506,7 +5618,66 @@ def is_antibot_error(error: str) -> bool:
 
 
 def looks_like_login_required_text(text: str) -> bool:
-    return bool(keyword_hits(textify(text).lower(), LOGIN_ASSIST_TERMS))
+    low = textify(text).lower()
+    return bool(
+        AUTH_LOGIN_MARKER_RE.search(low)
+        or any(token in low for token in ("登录", "登陆", "注册", "账号", "账户", "密码", "验证码", "请登录"))
+    )
+
+
+def url_has_auth_gate_path(url: str) -> bool:
+    parsed = urlparse(textify(url))
+    host = (parsed.hostname or "").lower()
+    first_label = host.split(".", 1)[0] if host else ""
+    if first_label in AUTH_GATE_HOST_LABELS:
+        return True
+    for segment in (parsed.path or "").lower().split("/"):
+        compact = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", segment).strip()
+        if not compact:
+            continue
+        tokens = set(compact.split())
+        has_noise = bool(tokens & AUTH_GATE_URL_NOISE_TOKENS)
+        if compact.replace(" ", "-") in AUTH_GATE_URL_TOKENS and not has_noise:
+            return True
+        if tokens & set(AUTH_GATE_URL_TOKENS) and len(tokens) <= 3 and not has_noise:
+            return True
+    return False
+
+
+def title_is_auth_gate(title: str) -> bool:
+    cleaned = re.sub(r"\s+", " ", textify(title)).strip()
+    if not cleaned or len(cleaned) > 140:
+        return False
+    chunks = [cleaned, *re.split(r"[|:：/·\-–—]+", cleaned)]
+    for chunk in chunks:
+        low = chunk.strip().lower()
+        if not low:
+            continue
+        if any(term in low for term in AUTH_GATE_TITLE_NOISE_TERMS):
+            continue
+        word_count = len(re.findall(r"[a-z0-9]+", low))
+        has_english_login = bool(AUTH_LOGIN_MARKER_RE.search(low))
+        has_chinese_login = any(token in low for token in ("登录", "登陆", "注册", "账号登录", "账户登录", "密码登录"))
+        if has_english_login and 0 < word_count <= 5:
+            return True
+        if has_chinese_login and len(low) <= 30:
+            return True
+    return False
+
+
+def login_gate_confirmed_by_url_title_or_form(
+    url: str,
+    title: str = "",
+    text: str = "",
+    error: str = "",
+) -> bool:
+    haystack = f"{url}\n{title}\n{text}\n{error}".lower()
+    has_login_language = looks_like_login_required_text(haystack) or is_login_required_error(error)
+    if not has_login_language:
+        return False
+    if url_has_auth_gate_path(url) or title_is_auth_gate(title):
+        return True
+    return bool(keyword_hits(haystack, AUTH_FORM_FIELD_TERMS))
 
 
 def looks_like_login_form(url: str, title: str = "", text: str = "") -> bool:
@@ -5516,8 +5687,12 @@ def looks_like_login_form(url: str, title: str = "", text: str = "") -> bool:
         return False
     value_hits = keyword_hits(haystack, LOGIN_ASSIST_VALUE_TERMS)
     form_hits = keyword_hits(haystack, LOGIN_FORM_TERMS)
-    if form_hits:
+    if keyword_hits(haystack, AUTH_FORM_FIELD_TERMS):
         return True
+    if not (url_has_auth_gate_path(url) or title_is_auth_gate(title)):
+        return False
+    if form_hits:
+        return not value_hits or len(clean_text(text, limit=2500)) < 1800
     return not value_hits and len(clean_text(text, limit=2500)) < 1800
 
 
@@ -5546,10 +5721,8 @@ def is_login_required_error(error: str) -> bool:
 
 
 def page_requires_user_login(page: PageExtract) -> bool:
-    haystack = f"{page.url}\n{page.title}\n{page.text_excerpt}\n{page.markdown}\n{page.error}"
-    if is_login_required_error(page.error):
-        return looks_like_login_required_text(haystack) or "rejected_auth_or_transaction_shell" in textify(page.error)
-    return bool(page.error and looks_like_login_form(page.url, page.title, page.text_excerpt or page.markdown))
+    text = f"{page.text_excerpt}\n{page.markdown}"
+    return bool(page.error and login_gate_confirmed_by_url_title_or_form(page.url, page.title, text, page.error))
 
 
 def audit_requires_user_login(row: Mapping[str, Any]) -> bool:
@@ -5570,9 +5743,19 @@ def audit_requires_user_login(row: Mapping[str, Any]) -> bool:
     page_role = textify(row.get("page_role"))
     hard_gate = textify(row.get("hard_gate") or row.get("rejection_code"))
     if page_role == "auth_or_account_shell":
-        return True
+        return login_gate_confirmed_by_url_title_or_form(
+            textify(row.get("url")),
+            textify(row.get("title")),
+            haystack,
+            hard_gate,
+        )
     if is_login_required_error(hard_gate):
-        return True
+        return login_gate_confirmed_by_url_title_or_form(
+            textify(row.get("url")),
+            textify(row.get("title")),
+            haystack,
+            hard_gate,
+        )
     return looks_like_login_form(textify(row.get("url")), textify(row.get("title")), haystack)
 
 

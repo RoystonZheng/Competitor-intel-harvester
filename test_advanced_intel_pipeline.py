@@ -338,6 +338,26 @@ class AdvancedIntelPipelineTest(unittest.TestCase):
         self.assertEqual(gui_rows[0]["automated_review_status"], "requires_user_login")
         self.assertEqual(login_rows[0]["login_assist_url"], "https://demo.example/login")
 
+    def test_display_page_with_login_nav_does_not_enter_login_queue(self):
+        page = PageExtract(
+            competitor="Apollo Go",
+            url="https://www.bitauto.com/news/100199303395.html",
+            title="Apollo Go by Baidu begins testing driverless ride services",
+            markdown="",
+            text_excerpt=(
+                "Sign in Register Apollo Go by Baidu begins testing driverless ride services. "
+                "The public article covers robotaxi launch cities and service availability."
+            ),
+            links=[],
+            image_urls=[],
+            fields={},
+            error="rejected_auth_or_transaction_shell: nav contains sign in/register",
+        )
+
+        manual_rows = rows_from_manual_review_queue([page])
+
+        self.assertEqual(manual_rows, [])
+
     def test_login_queue_prefers_original_login_url_over_stale_browser_url(self):
         opened_urls = []
         original_login_snapshot = competitor_harvester.login_assisted_browser_snapshot
@@ -391,6 +411,44 @@ class AdvancedIntelPipelineTest(unittest.TestCase):
         self.assertEqual(len(manual_rows), 1)
         self.assertEqual(manual_rows[0]["review_reason"], "login_required_user_action")
         self.assertEqual(manual_rows[0]["requires_user_login"], "yes")
+
+    def test_pre_crawl_display_page_with_login_nav_not_login_queue(self):
+        audit_row = {
+            "competitor": "Apollo Go",
+            "url": "https://www.bitauto.com/news/100199303395.html",
+            "title": "Apollo Go by Baidu begins testing driverless ride services",
+            "domain": "bitauto.com",
+            "hard_gate": "rejected_auth_or_transaction_shell",
+            "page_role": "auth_or_account_shell",
+            "source_kind": "third_party_verification_source",
+            "reason": "contains public launch and service availability evidence",
+            "value_signals": "决策相关,信息增量",
+            "matched_fields": "launch_city,service_scope",
+            "pm_value_score": "3",
+            "category_fit_score": "2",
+            "cleaned_excerpt_sample": "Sign in Register Apollo Go public launch article.",
+        }
+
+        manual_rows = rows_from_manual_review_queue([], [audit_row])
+
+        self.assertEqual(manual_rows, [])
+
+    def test_pre_crawl_article_about_login_is_not_login_queue(self):
+        audit_row = {
+            "competitor": "Fathom",
+            "url": "https://iconpolls.com/blogs/fathom-review-2026-ai-meeting-assistant-app-login-download-meeting-experience-and-faqs",
+            "title": "Fathom Review 2026: AI Meeting Assistant, App, Login, Download, Meeting Experience and FAQs",
+            "domain": "iconpolls.com",
+            "hard_gate": "rejected_auth_or_transaction_shell",
+            "page_role": "auth_or_account_shell",
+            "source_kind": "third_party_verification_source",
+            "reason": "blog article title mentions login as a topic",
+            "cleaned_excerpt_sample": "A review article about Fathom features, app login, download, meeting experience and FAQs.",
+        }
+
+        manual_rows = rows_from_manual_review_queue([], [audit_row])
+
+        self.assertEqual(manual_rows, [])
 
     def test_pre_crawl_login_queue_rejects_weak_competitor_binding(self):
         unrelated_login = {

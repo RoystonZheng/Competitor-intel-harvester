@@ -145,14 +145,42 @@ class JobTimingTest(unittest.TestCase):
             queue.write_text(
                 "competitor,domain,title,url,login_assist_url,requires_user_login,automated_review_status,next_step\n"
                 "Apollo Go,apollo.io,Apollo.io login,https://apollo.io/login,https://apollo.io/login,yes,awaiting_user_login,请登录后继续\n"
-                "Apollo Go,bitauto.com,Apollo Go by Baidu begins testing services,https://www.bitauto.com/news/1,https://www.bitauto.com/news/1,yes,awaiting_user_login,请登录后继续\n",
+                "Apollo Go,apollo-go.example.com,Apollo Go account login,https://apollo-go.example.com/login,https://apollo-go.example.com/login,yes,awaiting_user_login,请登录后继续\n",
                 encoding="utf-8-sig",
             )
 
             rows = app.load_login_required_reviews(Path(tmp))
 
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["domain"], "bitauto.com")
+        self.assertEqual(rows[0]["domain"], "apollo-go.example.com")
+
+    def test_login_pool_hides_public_display_pages_with_login_nav(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = Path(tmp) / "需登录队列.csv"
+            queue.write_text(
+                "competitor,domain,title,url,login_assist_url,requires_user_login,automated_review_status,next_step\n"
+                "Apollo Go,bitauto.com,Apollo Go by Baidu begins testing services,https://www.bitauto.com/news/1,https://www.bitauto.com/news/1,yes,awaiting_user_login,请登录后继续\n",
+                encoding="utf-8-sig",
+            )
+
+            rows = app.load_login_required_reviews(Path(tmp))
+
+        self.assertEqual(rows, [])
+
+    def test_login_pool_hides_articles_and_author_pages_about_login(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = Path(tmp) / "需登录队列.csv"
+            queue.write_text(
+                "competitor,domain,title,url,login_assist_url,requires_user_login,automated_review_status,next_step\n"
+                "Fathom,iconpolls.com,Fathom Review 2026: AI Meeting Assistant App Login Download,https://iconpolls.com/blogs/fathom-review-app-login-download,https://iconpolls.com/blogs/fathom-review-app-login-download,yes,awaiting_user_login,请登录后继续\n"
+                "Fathom,lcfathom.com,L.C. Fathom | Author,https://www.lcfathom.com,https://www.lcfathom.com,yes,awaiting_user_login,请登录后继续\n"
+                "Fathom,usefathom.com,Paul Jarvis author - Fathom Analytics,https://usefathom.com/author/paul-jarvis,https://usefathom.com/author/paul-jarvis,yes,awaiting_user_login,请登录后继续\n",
+                encoding="utf-8-sig",
+            )
+
+            rows = app.load_login_required_reviews(Path(tmp))
+
+        self.assertEqual(rows, [])
 
     def test_login_pool_hides_recruiting_account_pages(self):
         with tempfile.TemporaryDirectory() as tmp:
