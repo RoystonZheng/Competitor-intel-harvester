@@ -6,6 +6,7 @@ from pathlib import Path
 
 from filter_training import (
     apply_ml_prediction_to_decision,
+    bootstrap_filter_model_if_missing,
     build_training_rows,
     load_filter_model,
     save_filter_model,
@@ -163,6 +164,30 @@ class FilterTrainingTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["human_label"], "include")
         self.assertEqual(rows[0]["human_reason"], "official pricing page")
+
+    def test_bootstrap_filter_model_creates_pt_checkpoint_when_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            labels_path = Path(tmp) / "bootstrap_labels.csv"
+            labels_path.write_text(
+                "url,title,snippet,source_kind,page_role,human_label\n"
+                "https://demo.example/pricing,Demo pricing,Official pricing plans,official_core,pricing_packaging,include\n"
+                "https://demo.example/login,Demo login,Sign in account,low_value_or_aggregator,auth_or_account_shell,exclude\n"
+                "https://forum.example/demo,Demo forum,Unverified user rumor,community_or_social_signal,forum_or_community_discussion,verify_later\n",
+                encoding="utf-8-sig",
+            )
+            model_path = Path(tmp) / "models" / "filter_model.pt"
+
+            result = bootstrap_filter_model_if_missing(
+                model_path,
+                [labels_path],
+                min_labeled_rows=3,
+            )
+            loaded = load_filter_model(model_path)
+
+        self.assertTrue(result["created"])
+        self.assertEqual(result["training_rows"], 3)
+        self.assertEqual(loaded.training_rows, 3)
+        self.assertEqual(model_path.suffix, ".pt")
 
 
 if __name__ == "__main__":

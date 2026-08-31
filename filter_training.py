@@ -546,3 +546,32 @@ def model_status(path: Path) -> Dict[str, Any]:
         }
     except Exception as exc:
         return {"enabled": False, "path": str(path), "message": str(exc)}
+
+
+def bootstrap_filter_model_if_missing(
+    path: Path,
+    label_paths: Sequence[Path],
+    min_labeled_rows: int = 3,
+) -> Dict[str, Any]:
+    path = Path(path)
+    if path.exists():
+        status = model_status(path)
+        status["created"] = False
+        return status
+    rows = build_training_rows([Path(item) for item in label_paths])
+    model = train_filter_model(rows, min_labeled_rows=min_labeled_rows)
+    checkpoint = save_model_checkpoint_pt(model, path)
+    weights_path = path.with_name("filter_weights.json")
+    save_model_weights(model, weights_path)
+    return {
+        "created": True,
+        "enabled": True,
+        "path": str(path),
+        "checkpoint_path": str(path),
+        "weights_path": str(weights_path),
+        "checkpoint_format": checkpoint["format_version"],
+        "model_version": model.model_version,
+        "created_at": model.created_at,
+        "training_rows": model.training_rows,
+        "label_counts": model.label_counts,
+    }

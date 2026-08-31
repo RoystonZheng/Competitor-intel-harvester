@@ -97,6 +97,70 @@ class JobTimingTest(unittest.TestCase):
         self.assertEqual(rows[0]["competitor"], "Demo")
         self.assertEqual(rows[0]["login_assist_url"], "https://demo.example/login")
 
+    def test_train_local_filter_model_includes_current_job_training_sample(self):
+        original_runs_dir = app.RUNS_DIR
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app.RUNS_DIR = root / "runs"
+            job_id = "20260831-120000-abcdef"
+            job_dir = app.RUNS_DIR / job_id
+            job_dir.mkdir(parents=True)
+            labels_path = root / "review_labels.csv"
+            labels_path.write_text(
+                "competitor,title,url,snippet,human_label,human_reason\n",
+                encoding="utf-8",
+            )
+            sample_path = job_dir / "人工抽样标注表.csv"
+            sample_path.write_text(
+                "competitor,title,url,snippet,source_kind,page_role,human_label,human_reason\n"
+                "Demo,Official Pricing,https://demo.example/pricing,pricing tiers api,official,pricing,include,official pricing page\n"
+                "Demo,Login Shell,https://demo.example/login,email password sign in,account,auth_or_account_shell,exclude,login only\n"
+                "Demo,Forum Rumor,https://forum.example/demo,unverified roadmap rumor,community,discussion,verify_later,needs source check\n",
+                encoding="utf-8-sig",
+            )
+
+            try:
+                report = app.train_local_filter_model(
+                    {
+                        "labels_path": str(labels_path),
+                        "model_out": str(root / "models" / "filter_model.pt"),
+                        "cards_dir": str(root / "search_cards"),
+                        "min_labeled_rows": 3,
+                        "job_id": job_id,
+                        "include_problem_reviews": True,
+                    }
+                )
+            finally:
+                app.RUNS_DIR = original_runs_dir
+
+            self.assertEqual(report["training_rows"], 3)
+            self.assertIn(str(sample_path.resolve()), report["label_paths"])
+            self.assertTrue((root / "models" / "filter_model.pt").exists())
+
+    def test_model_status_for_ui_bootstraps_default_model_when_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            labels_path = root / "bootstrap_labels.csv"
+            labels_path.write_text(
+                "url,title,snippet,source_kind,page_role,human_label\n"
+                "https://demo.example/pricing,Demo pricing,Official pricing plans,official_core,pricing_packaging,include\n"
+                "https://demo.example/login,Demo login,Sign in account,low_value_or_aggregator,auth_or_account_shell,exclude\n"
+                "https://forum.example/demo,Demo forum,Unverified user rumor,community_or_social_signal,forum_or_community_discussion,verify_later\n",
+                encoding="utf-8-sig",
+            )
+            model_path = root / "models" / "filter_model.pt"
+
+            status = app.model_status_for_ui(
+                model_path,
+                bootstrap_label_paths=[labels_path],
+                min_labeled_rows=3,
+            )
+
+            self.assertTrue(status["enabled"])
+            self.assertTrue(status["bootstrap_created"])
+            self.assertEqual(status["training_rows"], 3)
+            self.assertTrue(model_path.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

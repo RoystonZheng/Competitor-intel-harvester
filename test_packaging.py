@@ -15,7 +15,7 @@ class PackagingConfigTest(unittest.TestCase):
 
     def test_pyproject_includes_split_modules(self):
         text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        for module in ["source_adapters", "structured_extractor", "filter_training", "search_cards"]:
+        for module in ["source_adapters", "structured_extractor", "filter_training", "search_cards", "analysis_templates"]:
             self.assertRegex(text, rf'"{re.escape(module)}"')
 
     def test_runtime_requirements_include_browser_adapter_dependency(self):
@@ -23,6 +23,7 @@ class PackagingConfigTest(unittest.TestCase):
         self.assertIn("crawl4ai", requirements)
         self.assertIn("icrawler", requirements)
         self.assertIn("playwright", requirements)
+        self.assertIn("PyYAML", requirements)
         self.assertIn("yt-dlp", requirements)
 
     def test_env_example_documents_local_model_and_source_services(self):

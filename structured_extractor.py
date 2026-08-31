@@ -64,6 +64,20 @@ def dimension_for_field(field_key: str) -> str:
         return "security"
     if field_key in {"customers", "gtm_channel"}:
         return "gtm_customer"
+    if field_key in {"av_positioning", "av_market_operations", "av_release_tracking"}:
+        return "autonomous_vehicle_market_operations"
+    if field_key in {"av_pricing_commercialization"}:
+        return "autonomous_vehicle_commercialization"
+    if field_key in {"av_vehicle_platform", "av_autonomous_system"}:
+        return "autonomous_vehicle_technology_specs"
+    if field_key in {"av_safety_compliance"}:
+        return "autonomous_vehicle_safety_compliance"
+    if field_key in {"av_ride_experience", "av_edge_case_performance", "av_hmi_cabin"}:
+        return "autonomous_vehicle_user_experience"
+    if field_key in {"av_operations_maintenance"}:
+        return "autonomous_vehicle_operations"
+    if field_key in {"av_public_opinion"}:
+        return "autonomous_vehicle_public_opinion"
     return "product_capability"
 
 
@@ -148,6 +162,66 @@ DEFAULT_FIELDS: Dict[str, Dict[str, Any]] = {
             r"\b(ASTM\s?F2040|CE\s?EN\s?1077|EN\s?1077|FIS|MIPS|SOC\s?2|GDPR|HIPAA|ISO\s?\d{3,6})\b",
         ],
     },
+    "av_positioning": {
+        "label": "产品定位",
+        "description": "目标用户、服务形态、运营场景或产品概念。",
+        "patterns": [r"(目标用户|服务形态|运营场景|产品概念|Robotaxi|无人车|自动驾驶出租车)"],
+    },
+    "av_market_operations": {
+        "label": "市场与运营",
+        "description": "投放城市、运营范围、车辆规模、站点密度、等待时间或订单流转。",
+        "patterns": [r"(投放城市|运营范围|服务范围|车辆规模|站点密度|等待时间|订单流转|service area|fleet|waiting time)"],
+    },
+    "av_pricing_commercialization": {
+        "label": "价格与商业化",
+        "description": "计费规则、优惠补贴、价格对比、盈利口径或合作方。",
+        "patterns": [r"(计费规则|优惠补贴|价格对比|盈利口径|合作方|fare|pricing|subsidy|commercialization)"],
+    },
+    "av_vehicle_platform": {
+        "label": "整车平台",
+        "description": "基础车型、长宽高、轴距、重量、续航、能耗、座椅或补能方式。",
+        "patterns": [r"(基础车型|长宽高|轴距|重量|续航|能耗|门型|座椅|补能方式|wheelbase|range|vehicle platform)"],
+    },
+    "av_autonomous_system": {
+        "label": "自动驾驶系统",
+        "description": "传感器、计算平台、算力、地图定位、清洁或冗余设计。",
+        "patterns": [r"(传感器|激光雷达|毫米波雷达|摄像头|计算平台|算力|地图|定位|冗余|sensor|lidar|radar|camera|TOPS)"],
+    },
+    "av_safety_compliance": {
+        "label": "安全与合规",
+        "description": "远程监控、异常检测、事故处理、乘员保护、隐私保护或监管许可。",
+        "patterns": [r"(远程监控|异常检测|碰撞处理|事故|乘员保护|隐私保护|监管许可|safety report|permit|remote assistance)"],
+    },
+    "av_ride_experience": {
+        "label": "乘坐体验",
+        "description": "上车、下车、路线、加速刹车、横向体感、车内屏、娱乐、温度或空间。",
+        "patterns": [r"(上车|下车|路线|加速|刹车|横向体感|车内屏|音乐|温度|空间|ride experience|pickup|drop-off)"],
+    },
+    "av_edge_case_performance": {
+        "label": "复杂场景表现",
+        "description": "窄路掉头、锥桶施工、Cut in、无保护转弯、人流、交警指挥、临停避让或事故。",
+        "patterns": [r"(窄路掉头|锥桶|施工|Cut in|无保护转弯|密集人流|交警指挥|临停避让|edge case|construction cone)"],
+    },
+    "av_hmi_cabin": {
+        "label": "智舱与交互",
+        "description": "车内外屏、语音、寻车、解锁、SOS、E-stop、摄像头提示或乘客控制项。",
+        "patterns": [r"(车内外屏|语音|寻车|解锁|SOS|E-stop|摄像头提示|乘客控制|HMI|cabin screen)"],
+    },
+    "av_operations_maintenance": {
+        "label": "运维效率",
+        "description": "自动唤醒、自动出入库、OTA、远程启动、补能、清洁、故障诊断或线下救援。",
+        "patterns": [r"(自动唤醒|自动出入库|OTA|远程启动|补能|清洁|故障诊断|线下救援|operations|maintenance)"],
+    },
+    "av_public_opinion": {
+        "label": "社会接受度",
+        "description": "热搜、指数、互动量、就业争议、隐私争议、安全争议或城市差异。",
+        "patterns": [r"(热搜|指数|互动量|就业争议|隐私争议|安全争议|城市差异|public opinion|acceptance|privacy concern)"],
+    },
+    "av_release_tracking": {
+        "label": "更新节奏",
+        "description": "版本发布时间、功能更新、城市扩张、事故后改动或下一代车型。",
+        "patterns": [r"(版本发布时间|功能更新|城市扩张|事故后改动|下一代车型|release|update|next generation)"],
+    },
 }
 
 
@@ -178,6 +252,21 @@ CATEGORY_FIELD_KEYS = {
         "certification",
     ],
     "general": ["pricing", "packaging_limits", "customers"],
+    "autonomous_vehicle_robotaxi": [
+        "pricing",
+        "av_positioning",
+        "av_market_operations",
+        "av_pricing_commercialization",
+        "av_vehicle_platform",
+        "av_autonomous_system",
+        "av_safety_compliance",
+        "av_ride_experience",
+        "av_edge_case_performance",
+        "av_hmi_cabin",
+        "av_operations_maintenance",
+        "av_public_opinion",
+        "av_release_tracking",
+    ],
 }
 
 

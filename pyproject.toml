@@ -17,6 +17,7 @@ dependencies = [
   "crawl4ai>=0.7.0",
   "icrawler>=0.6.9",
   "playwright>=1.45.0",
+  "PyYAML>=6.0",
   "yt-dlp>=2024.8.6"
 ]
 
@@ -33,6 +34,7 @@ competitor-intel-train = "train_filter_model:main"
 [tool.setuptools]
 py-modules = [
   "app",
+  "analysis_templates",
   "competitor_harvester",
   "filter_training",
   "search_cards",

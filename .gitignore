@@ -29,6 +29,8 @@ search_cards/
 training_data/review_labels.csv
 downloaded_images/
 gui_review_snapshots/
+cooper_unmanned_vehicle_reports/
+analysis_dimensions/*.md
 
 # Local model checkpoints / weights
 *.pt

@@ -12,11 +12,13 @@ from competitor_harvester import (
     cluster_structured_facts,
     dedupe_results,
     download_searxng_image_results,
+    dedupe_login_review_rows,
     execute_gui_review_queue,
     extract_competitor_candidates_from_results,
     extract_structured_facts,
     main,
     page_quality_issue,
+    page_extracts_from_gui_review_rows,
     login_required_queue_rows,
     rows_from_manual_review_queue,
     rows_from_images,
@@ -388,6 +390,219 @@ class AdvancedIntelPipelineTest(unittest.TestCase):
         self.assertEqual(len(manual_rows), 1)
         self.assertEqual(manual_rows[0]["review_reason"], "login_required_user_action")
         self.assertEqual(manual_rows[0]["requires_user_login"], "yes")
+
+    def test_login_assisted_snapshot_becomes_page_extract_for_analysis(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_path = Path(tmp) / "login-assisted.txt"
+            snapshot_path.write_text(
+                "Title: Demo pricing\n"
+                "Demo Pro plan costs $19 per user per month. API access and SSO are included.",
+                encoding="utf-8",
+            )
+            rows = [
+                {
+                    "competitor": "Demo",
+                    "url": "https://demo.example/account/pricing",
+                    "title": "Demo pricing",
+                    "canonical_url": "https://demo.example/account/pricing",
+                    "automated_review_status": "login_assisted_snapshot_captured",
+                    "text_snapshot_path": str(snapshot_path),
+                    "screenshot_path": str(Path(tmp) / "login-assisted.png"),
+                }
+            ]
+
+            pages = page_extracts_from_gui_review_rows(rows)
+
+        self.assertEqual(len(pages), 1)
+        self.assertEqual(pages[0].competitor, "Demo")
+        self.assertEqual(pages[0].url, "https://demo.example/account/pricing")
+        self.assertIn("Demo Pro plan costs $19", pages[0].markdown)
+        self.assertEqual(pages[0].error, "")
+
+    def test_login_assist_runs_before_crawl_and_exports_snapshot_page(self):
+        events = []
+        originals = {
+            "check_searxng": competitor_harvester.check_searxng,
+            "searxng_categories": competitor_harvester.searxng_categories,
+            "run_searches": competitor_harvester.run_searches,
+            "crawl_with_crawl4ai": competitor_harvester.crawl_with_crawl4ai,
+            "LoginAssistSession": competitor_harvester.LoginAssistSession,
+        }
+
+        def fake_check_searxng(*_args, **_kwargs):
+            return True, ""
+
+        def fake_categories(*_args, **_kwargs):
+            return []
+
+        def fake_run_searches(*_args, **_kwargs):
+            return (
+                [
+                    SearchResult(
+                        competitor="Demo",
+                        category="web",
+                        query="Demo login",
+                        title="Sign in to Demo",
+                        url="https://demo.example/login",
+                        snippet="Email Password Sign in",
+                        engine="test",
+                        score=10,
+                    ),
+                    SearchResult(
+                        competitor="Demo",
+                        category="web",
+                        query="Demo pricing",
+                        title="Demo Pricing",
+                        url="https://demo.example/pricing",
+                        snippet="Official pricing page. Pro plan costs $29 per month.",
+                        engine="test",
+                        score=9,
+                    ),
+                ],
+                [],
+            )
+
+        async def fake_crawl(urls_by_competitor, *_args, **_kwargs):
+            events.append(("crawl", [url for _competitor, url in urls_by_competitor]))
+            return [
+                PageExtract(
+                    competitor="Demo",
+                    url="https://demo.example/pricing",
+                    title="Demo Pricing",
+                    markdown="Demo Pro plan costs $29 per month.",
+                    text_excerpt="Demo Pro plan costs $29 per month.",
+                    links=[],
+                    image_urls=[],
+                    fields={"pricing": "$29 per month"},
+                )
+            ]
+
+        class FakeLoginAssistSession:
+            def __init__(self, out_dir, *_args, **_kwargs):
+                self.out_dir = Path(out_dir)
+                self.rows = []
+
+            def add_rows(self, rows):
+                deduped = dedupe_login_review_rows(rows)
+                if deduped:
+                    events.append(("queue", [competitor_harvester.review_target_url(row) for row in deduped]))
+                self.rows.extend(deduped)
+                return len(deduped)
+
+            def queue_rows(self):
+                return [
+                    {
+                        "competitor": "Demo",
+                        "priority": "P0-LOGIN",
+                        "review_reason": "login_required_user_action",
+                        "title": "Demo account page",
+                        "url": "https://demo.example/login",
+                        "domain": "demo.example",
+                        "queued_url_count": "1",
+                        "login_assist_url": "https://demo.example/login",
+                        "automated_review_status": "awaiting_user_login",
+                        "text_snapshot_path": "",
+                        "screenshot_path": "",
+                        "text_snapshot_excerpt": "",
+                        "next_step": "waiting",
+                        "allowed_boundary": "",
+                    }
+                ]
+
+            def capture_all(self, *_args, **_kwargs):
+                events.append(("capture", [competitor_harvester.review_target_url(row) for row in self.rows]))
+                snapshot_dir = self.out_dir / "gui_review_snapshots"
+                snapshot_dir.mkdir(parents=True, exist_ok=True)
+                snapshot_path = snapshot_dir / "login-1.txt"
+                snapshot_path.write_text(
+                    "Title: Demo account pricing\n"
+                    "After login, Demo Team plan costs $49 per month and includes SSO.",
+                    encoding="utf-8",
+                )
+                return [
+                    {
+                        "competitor": "Demo",
+                        "priority": "P0-LOGIN",
+                        "review_reason": "login_required_user_action",
+                        "requires_user_login": "yes",
+                        "title": "Demo account pricing",
+                        "url": "https://demo.example/login",
+                        "domain": "demo.example",
+                        "canonical_url": "https://demo.example/login",
+                        "automated_review_status": "login_assisted_snapshot_captured",
+                        "text_snapshot_path": str(snapshot_path),
+                        "screenshot_path": "",
+                        "text_snapshot_excerpt": "After login, Demo Team plan costs $49 per month and includes SSO.",
+                        "login_assist_url": "https://demo.example/login",
+                        "next_step": "captured",
+                    }
+                ]
+
+            def close(self):
+                events.append(("close", []))
+
+        competitor_harvester.check_searxng = fake_check_searxng
+        competitor_harvester.searxng_categories = fake_categories
+        competitor_harvester.run_searches = fake_run_searches
+        competitor_harvester.crawl_with_crawl4ai = fake_crawl
+        competitor_harvester.LoginAssistSession = FakeLoginAssistSession
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                code = main(
+                    [
+                        "Demo",
+                        "--searxng-url",
+                        "http://localhost:8888",
+                        "--out",
+                        tmp,
+                        "--per-query",
+                        "1",
+                        "--max-pages",
+                        "2",
+                        "--login-assist",
+                        "--login-assist-wait",
+                        "1",
+                        "--skip-images",
+                    ]
+                )
+                pages_csv = Path(tmp) / "页面抓取结果.csv"
+                if not pages_csv.exists():
+                    pages_csv = Path(tmp) / "_internal" / "pages.csv"
+                with pages_csv.open("r", encoding="utf-8-sig", newline="") as handle:
+                    page_rows = list(csv.DictReader(handle))
+        finally:
+            for name, original in originals.items():
+                setattr(competitor_harvester, name, original)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(events[0][0], "queue")
+        self.assertEqual(events[1][0], "crawl")
+        self.assertEqual(events[2][0], "queue")
+        self.assertEqual(events[3][0], "capture")
+        self.assertTrue(any(row["url"] == "https://demo.example/login" for row in page_rows))
+
+    def test_login_required_queue_dedupes_by_competitor_and_domain(self):
+        rows = dedupe_login_review_rows(
+            [
+                {
+                    "competitor": "Demo",
+                    "review_reason": "login_required_user_action",
+                    "requires_user_login": "yes",
+                    "url": "https://demo.example/login",
+                    "login_assist_url": "https://demo.example/login",
+                },
+                {
+                    "competitor": "Demo",
+                    "review_reason": "login_required_user_action",
+                    "requires_user_login": "yes",
+                    "url": "https://demo.example/account",
+                    "login_assist_url": "https://demo.example/account",
+                },
+            ]
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["queued_url_count"], "2")
 
     def test_pages_export_structured_facts_for_prices_specs_and_certifications(self):
         plan = build_product_collection_plan(["Oakley MOD5"], own_product_name="双板全盔")

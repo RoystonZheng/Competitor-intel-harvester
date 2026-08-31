@@ -212,6 +212,12 @@ python competitor_harvester.py "Gamma" --skip-crawl --skip-images
 
 CSV 文件使用 `utf-8-sig` 写入，Excel/Numbers 直接打开中文不应再乱码。
 
+## 分析模板
+
+`analysis_dimensions/*.yml` 用来沉淀成熟竞品分析的维度脚本。程序会在抓取前根据我方产品、竞品名和品类自动匹配模板，把模板里的分析维度、必找证据、来源优先级和报告结构合并进采集计划。当前已内置 `autonomous_vehicle_robotaxi` 模板，适合无人车、Robotaxi、自动驾驶整车类竞品分析。
+
+模板只保存可复用的方法，不保存内部原文、私有链接或账号内容。开源使用者可以继续新增自己的品类模板；每次人工核验后生成的搜索卡片会和模板一起影响下一轮检索与筛选。
+
 ## 本地训练闭环
 
 训练目标不是微调 Codex、Claude Code、Cursor 或 DeepSeek，而是训练本工具自己的本地筛选模型。它学习人工复核结果，下一轮给候选来源生成：
@@ -287,7 +293,7 @@ python3 competitor_harvester.py "Gamma" --disable-search-cards
 
 `--max-pages` 是每个竞品的抓取上限，不是必须抓满的目标。有官网候选时，目录站、SEO 聚合页、登录页、论坛/社媒、反爬评论站和同名无关产品会留在 `all_sources.csv` / `evidence_audit.csv` 里做审计，但不会送进 Crawl4AI 污染正文。第三方页面只保留少量高价值验证源，例如客户案例、发布稿或可信公开报道。
 
-反爬页面不会直接进入最终事实结论。若它看起来是官方定价、功能、文档、安全、客户案例等核心页，会进入 `问题页面核验清单.md/csv`。登录/注册/账号权限页也会合并进去。在 UI 中默认开启登录辅助，程序会弹出浏览器让用户使用自己有权限的账号处理；等待期内页面变为可读时，会保存文本快照和截图，仍不可读则标记为“超时未人工登录”或“需账号权限”。不做验证码破解、登录/付费/访问控制绕过，不保存账号凭据，也不调用未授权私有接口。
+反爬页面不会直接进入最终事实结论。若它看起来是官方定价、功能、文档、安全、客户案例等核心页，会进入 `问题页面核验清单.md/csv`。登录/注册/账号权限页会先进入 `需登录队列.md/csv`，按竞品和域名去重；公开页面继续采集。UI 中默认开启登录辅助后，程序复用同一个可见浏览器登录态，网页抓取结束后最多再等待 120 秒：用户已登录且页面变为可读时，会保存文本快照和截图，仍不可读则标记为“超时未人工登录”或“需账号权限”。不做验证码破解、登录/付费/访问控制绕过，不保存账号凭据，也不调用未授权私有接口。
 
 最终报告按 Productboard + Asana 综合框架输出：
 
@@ -321,8 +327,8 @@ python3 competitor_harvester.py "Gamma" --disable-search-cards
 --require-codex-review     Codex 分析失败时任务失败，不退回规则版报告
 --codex-model MODEL        可选，指定 Codex 模型
 --skip-gui-review          只输出复核队列，不自动做公开快照
---login-assist             遇到登录/注册页时弹出可见浏览器，等待用户授权后继续保存快照
---login-assist-wait 120    登录辅助等待秒数
+--login-assist             登录/注册页进入集中队列，复用同一可见浏览器登录态保存快照
+--login-assist-wait 120    公开网页抓取结束后的登录等待秒数
 --ml-model PATH            本地训练筛选模型路径，默认 models/filter_model.pt
 --disable-ml-filter        不加载本地训练模型
 --ml-auto-include-threshold 0.75  模型自动提升为 accepted 的收录分阈值

@@ -9,4 +9,6 @@ include start_local_searxng.sh
 include 数据源与竞品发现策略.md
 include 竞品信息收录过滤策略设计.md
 include training_data/README.md
+include training_data/bootstrap_labels.csv
 include training_data/review_labels.example.csv
+recursive-include analysis_dimensions *.yml *.yaml

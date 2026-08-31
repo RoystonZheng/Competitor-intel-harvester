@@ -1,0 +1,272 @@
+schema_version: "analysis-dimensions-v1"
+product_type_key: "autonomous_vehicle_robotaxi"
+product_type_label: "无人车 / Robotaxi / 自动驾驶整车"
+
+template_basis: "从成熟无人车竞品分析材料中抽象出的公开可复用维度，不包含内部原文、私有链接或资源 ID。"
+
+match_keywords:
+  - "无人车"
+  - "自动驾驶"
+  - "自动驾驶出租车"
+  - "Robotaxi"
+  - "self-driving"
+  - "driverless"
+  - "autonomous vehicle"
+  - "Apollo Go"
+  - "萝卜快跑"
+  - "RT6"
+  - "Pony.ai"
+  - "小马智行"
+  - "WeRide"
+  - "文远知行"
+  - "Waymo"
+  - "Cruise"
+  - "Zoox"
+  - "车机"
+
+analysis_intent_questions:
+  - "本轮报告要支持产品定义、版本升级、运营优化、商业判断、舆情研判中的哪一种决策？"
+  - "我方产品最需要证明或反驳的假设是什么？"
+  - "哪些结论必须能落到产品动作或验证计划？"
+
+evidence_schema:
+  required_fields:
+    - "source_url"
+    - "source_title"
+    - "source_type"
+    - "published_at"
+    - "captured_at"
+    - "competitor"
+    - "evidence_type"
+    - "evidence_text"
+    - "confidence"
+    - "verification_status"
+  video_required_when_applicable:
+    - "video_timestamp"
+    - "screenshot_path"
+    - "transcript_excerpt"
+  confidence_rules:
+    high: "官方或监管来源，或多个独立来源指向同一事实。"
+    medium: "可信媒体、专业测评、可回放视频，但缺少官方确认。"
+    low: "论坛、社媒、二手转述、单一用户反馈，必须进入待核实。"
+
+source_priority:
+  - tier: "P0"
+    name: "官方和监管"
+    examples:
+      - "官网"
+      - "官方文档"
+      - "产品发布会"
+      - "城市运营公告"
+      - "监管许可/事故通报"
+    use_for:
+      - "参数"
+      - "价格"
+      - "投放城市"
+      - "运营范围"
+      - "安全与合规"
+  - tier: "P1"
+    name: "实测和专业媒体"
+    examples:
+      - "官媒试乘"
+      - "汽车媒体长测"
+      - "科技媒体体验"
+      - "视频测评"
+    use_for:
+      - "体验"
+      - "场景"
+      - "等待时间"
+      - "路线效率"
+      - "正负向评价"
+  - tier: "P2"
+    name: "平台和社区"
+    examples:
+      - "Bilibili"
+      - "抖音"
+      - "小红书"
+      - "微博"
+      - "知乎"
+      - "Reddit"
+    use_for:
+      - "舆论 Topic"
+      - "异常 case"
+      - "用户真实反馈"
+  - tier: "P3"
+    name: "二手聚合"
+    examples:
+      - "榜单"
+      - "转载"
+      - "SEO 聚合页"
+    use_for:
+      - "线索发现"
+      - "待核实补充"
+
+dimensions:
+  - id: "positioning"
+    label: "产品定位"
+    required_evidence:
+      - "目标用户"
+      - "服务形态"
+      - "运营场景"
+      - "产品概念"
+  - id: "market_operations"
+    label: "市场与运营"
+    required_evidence:
+      - "投放城市"
+      - "运营范围"
+      - "车辆规模"
+      - "站点密度"
+      - "等待时间"
+      - "订单流转"
+  - id: "pricing_commercialization"
+    label: "价格与商业化"
+    required_evidence:
+      - "计费规则"
+      - "优惠补贴"
+      - "价格对比"
+      - "盈利口径"
+      - "合作方"
+  - id: "vehicle_platform"
+    label: "整车平台"
+    required_evidence:
+      - "基础车型"
+      - "长宽高"
+      - "轴距"
+      - "重量"
+      - "续航"
+      - "能耗"
+      - "门型和座椅"
+      - "补能方式"
+  - id: "autonomous_system"
+    label: "自动驾驶系统"
+    required_evidence:
+      - "传感器数量"
+      - "传感器布局"
+      - "计算平台"
+      - "算力"
+      - "地图/定位"
+      - "传感器清洁"
+      - "冗余设计"
+  - id: "safety_compliance"
+    label: "安全与合规"
+    required_evidence:
+      - "远程监控"
+      - "异常检测"
+      - "碰撞处理"
+      - "特殊工况"
+      - "乘员保护"
+      - "隐私保护"
+      - "监管许可"
+  - id: "ride_experience"
+    label: "乘坐体验"
+    required_evidence:
+      - "上车"
+      - "下车"
+      - "路线"
+      - "加速刹车"
+      - "横向体感"
+      - "车内屏"
+      - "音乐娱乐"
+      - "温度"
+      - "空间"
+      - "异味"
+  - id: "edge_case_performance"
+    label: "复杂场景表现"
+    required_evidence:
+      - "窄路掉头"
+      - "锥桶施工"
+      - "Cut in"
+      - "无保护转弯"
+      - "密集人流"
+      - "交警指挥"
+      - "临停避让"
+      - "事故/碰撞"
+  - id: "hmi_cabin"
+    label: "智舱与交互"
+    required_evidence:
+      - "车内外屏"
+      - "语音"
+      - "寻车"
+      - "解锁"
+      - "SOS"
+      - "E-stop"
+      - "摄像头提示"
+      - "乘客控制项"
+  - id: "operations_maintenance"
+    label: "运维效率"
+    required_evidence:
+      - "自动唤醒"
+      - "自动出入库"
+      - "OTA"
+      - "远程启动"
+      - "补能"
+      - "清洁"
+      - "故障诊断"
+      - "线下救援"
+  - id: "public_opinion"
+    label: "社会接受度"
+    required_evidence:
+      - "热搜"
+      - "指数"
+      - "互动量"
+      - "就业争议"
+      - "隐私争议"
+      - "安全争议"
+      - "城市差异"
+  - id: "release_tracking"
+    label: "更新节奏"
+    required_evidence:
+      - "版本发布时间"
+      - "功能更新"
+      - "城市扩张"
+      - "事故后改动"
+      - "下一代车型"
+
+default_scorecard:
+  scale: "0-5"
+  weights:
+    service_operations: 0.20
+    autonomous_driving_performance: 0.20
+    safety_compliance: 0.20
+    passenger_experience: 0.15
+    operations_cost: 0.15
+    commercialization_public_acceptance: 0.10
+  score_meaning:
+    "5": "明显领先，有官方或多来源证据支撑。"
+    "4": "能力完整，证据可信，但领先幅度不确定。"
+    "3": "基本具备，存在场景限制或证据不足。"
+    "2": "明显短板，已经影响用户体验或运营效率。"
+    "1": "多次负面证据指向同一问题。"
+    "0": "未发现能力，或公开证据显示不具备。"
+
+case_schema:
+  required_fields:
+    - "case_name"
+    - "city_or_road"
+    - "source_url"
+    - "video_timestamp"
+    - "screenshot_path"
+    - "vehicle_behavior"
+    - "user_sentiment"
+    - "impact_area"
+    - "retestable"
+    - "implication_for_own_product"
+
+report_outline:
+  - "结论摘要"
+  - "本轮分析范围"
+  - "竞品基础画像"
+  - "核心能力对标"
+  - "量化评分表"
+  - "真实场景 case"
+  - "舆论与社会接受度"
+  - "我方产品方向"
+  - "待核实名单"
+  - "来源附录"
+
+model_prompt: |
+  你是无人车/Robotaxi 竞品分析助手。请基于已采集证据生成竞品分析报告。
+  先判断本轮分析目标，再调整维度权重。不要把网页摘要直接拼接成报告。
+  所有事实结论必须能回到 source_url、source_title、evidence_text；视频结论必须带 video_timestamp 或截图路径。
+  不能追溯的内容放入待核实名单，不作为事实依据。
+  输出必须包含：结论、范围、竞品画像、维度对标、场景 case、评分表、我方方向、待核实证据、来源附录。

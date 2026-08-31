@@ -32,7 +32,14 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, parse_qsl, quote, urlencode, urlparse, urlunparse
 from urllib.request import ProxyHandler, Request, build_opener
 
-from filter_training import LocalFilterModel, apply_ml_prediction_to_decision, load_filter_model, model_status
+from analysis_templates import select_analysis_template
+from filter_training import (
+    LocalFilterModel,
+    apply_ml_prediction_to_decision,
+    bootstrap_filter_model_if_missing,
+    load_filter_model,
+    model_status,
+)
 from search_cards import load_search_cards
 from source_adapters import (
     adapter_search_templates as source_adapter_search_templates,
@@ -48,6 +55,7 @@ from structured_extractor import (
 
 APP_DIR = Path(__file__).resolve().parent
 DEFAULT_FILTER_MODEL_PATH = APP_DIR / "models" / "filter_model.pt"
+DEFAULT_BOOTSTRAP_LABELS_PATH = APP_DIR / "training_data" / "bootstrap_labels.csv"
 DEFAULT_SEARCH_CARDS_DIR = APP_DIR / "search_cards"
 
 TRACKING_QUERY_PARAMS = {
@@ -746,6 +754,7 @@ LOGIN_REQUIRED_FIELDS = [
     "title",
     "url",
     "domain",
+    "queued_url_count",
     "login_assist_url",
     "automated_review_status",
     "text_snapshot_path",
@@ -878,6 +887,13 @@ class ProductCollectionPlan:
     directed_source_search_templates: List[str] = dataclasses.field(default_factory=list)
     value_judgment_rules: List[ValueJudgmentRule] = dataclasses.field(default_factory=list)
     search_cards_applied: List[Dict[str, Any]] = dataclasses.field(default_factory=list)
+    analysis_template_key: str = ""
+    analysis_template_label: str = ""
+    analysis_template_path: str = ""
+    analysis_template_summary: str = ""
+    analysis_template_match_score: int = 0
+    analysis_dimensions: List[Dict[str, Any]] = dataclasses.field(default_factory=list)
+    analysis_report_outline: List[str] = dataclasses.field(default_factory=list)
 
 
 @dataclasses.dataclass
@@ -1186,6 +1202,23 @@ def build_directed_source_search_templates(category: str) -> List[str]:
                 "{name} docs API rate limits",
             ]
         )
+    elif category == "autonomous_vehicle_robotaxi":
+        templates.extend(
+            [
+                "{name} official robotaxi autonomous vehicle specs",
+                "{name} official safety report autonomous driving",
+                "{name} official city operation service area fare",
+                "{name} vehicle platform sensor compute lidar camera radar",
+                "{name} regulator permit autonomous vehicle city",
+                "{name} robotaxi ride experience waiting time review",
+                "{name} site:youtube.com robotaxi ride review",
+                "{name} site:bilibili.com 无人车 试乘 评测",
+                "{name} site:douyin.com 无人车 试乘",
+                "{name} site:xiaohongshu.com 无人车 体验",
+                "{name} site:zhihu.com 无人车 评价",
+                "{name} site:weixin.qq.com 无人车 运营 安全",
+            ]
+        )
     elif category in {"physical_product", "snow_helmet"}:
         templates.extend(
             [
@@ -1274,7 +1307,36 @@ def build_source_strategies(category: str) -> List[SourceStrategyItem]:
             "不把破解下载、搬运站、无来源二创或账号壳作为事实证据。",
         ),
     ]
-    if category == "ai_software":
+    if category == "autonomous_vehicle_robotaxi":
+        strategies.insert(
+            1,
+            source_strategy(
+                "无人车官方、监管与运营来源",
+                "P0/P1",
+                ["官网产品页", "官方安全报告", "城市运营公告", "服务区/计价说明", "监管许可/事故通报", "官方 App 页面"],
+                "无人车报告先确认产品实体、车辆平台、运营城市、服务范围、计价规则和安全合规来源；官方或监管来源优先承载事实。",
+                "通过 SearXNG 定向检索官网、监管公告、城市运营信息和官方 App 页面；可读网页走 Crawl4AI，不可读但公开可见时进入 GUI 复核队列。",
+                "记录 URL、标题、发布日期、城市/区域、车型/版本、政策主体和抓取时间；监管或官方材料可作为主证据。",
+                "用于支撑产品定位、运营范围、商业化、安全合规、版本更新和核心参数判断。",
+                "官网或监管页被反爬时优先查同站公开静态页、PDF、新闻稿、sitemap 或镜像摘要；登录/验证码页面只等待用户公开登录，不绕过访问控制。",
+                "不调用未授权接口，不进入后台系统，不抓取非公开运营数据。",
+            ),
+        )
+        strategies.insert(
+            2,
+            source_strategy(
+                "无人车视频、实测与舆情来源",
+                "P1/P2",
+                ["汽车媒体试乘", "公开视频测评", "Bilibili/抖音/小红书体验", "知乎/Reddit 讨论", "新闻长测"],
+                "只有视频或帖子明确出现竞品、城市、场景、乘坐体验、异常 case 或公众争议时才进入复核；泛流量短视频和搬运号降权。",
+                "仍先用 SearXNG 定向检索公开视频和公开帖子；视频优先读取标题、简介、字幕和元数据，必要时 GUI 观看关键片段并截图。",
+                "视频观点必须保留 URL、账号、发布日期、时间点、截图或转写片段；社区观点默认是待核实线索。",
+                "用于补充真实场景、复杂路况表现、等待时间、用户情绪、社会接受度和可复测 case。",
+                "如果视频明显展示竞品实车、公开道路、乘坐流程或异常处置，但无可读文本，进入 GUI/视频复核；无法补到时间点则不写成 Fact。",
+                "不绕过登录、地区、会员、付费或隐私限制。",
+            ),
+        )
+    elif category == "ai_software":
         strategies.insert(
             1,
             source_strategy(
@@ -1305,6 +1367,112 @@ def build_source_strategies(category: str) -> List[SourceStrategyItem]:
             ),
         )
     return strategies
+
+
+def analysis_dimension_field_key(dimension: Mapping[str, Any]) -> str:
+    raw = textify(dimension.get("id")) or textify(dimension.get("label")) or "dimension"
+    key = re.sub(r"[^a-z0-9_]+", "_", raw.lower()).strip("_")
+    if not key:
+        key = slugify(raw).replace("-", "_") or "dimension"
+    return key if key.startswith("av_") else f"av_{key}"
+
+
+def regex_for_evidence_term(term: str) -> str:
+    term = textify(term).strip()
+    if not term:
+        return ""
+    if re.search(r"[\u4e00-\u9fff]", term):
+        return re.escape(term)
+    return r"\b" + re.escape(term).replace(r"\ ", r"\s+") + r"\b"
+
+
+def field_from_analysis_dimension(dimension: Mapping[str, Any]) -> ProductCollectionField:
+    label = textify(dimension.get("label")) or textify(dimension.get("id")) or "分析维度"
+    required_evidence = unique_strings(dimension.get("required_evidence") or [])
+    search_terms = unique_strings([label, *required_evidence])
+    patterns = unique_strings(regex_for_evidence_term(term) for term in search_terms)
+    description = f"模板维度：围绕“{label}”收集可追溯证据，优先保留能支撑产品判断的具体事实。"
+    return field_spec(
+        analysis_dimension_field_key(dimension),
+        label,
+        description,
+        patterns,
+        search_terms,
+    )
+
+
+def apply_analysis_template_to_collection_plan(
+    plan: ProductCollectionPlan,
+    competitors: Sequence[str],
+    own_product_name: str = "",
+    own_product_positioning: str = "",
+    own_product_context: str = "",
+) -> ProductCollectionPlan:
+    template, match_score = select_analysis_template(
+        plan.category,
+        competitors,
+        own_product_name,
+        own_product_positioning,
+        own_product_context,
+    )
+    if not template:
+        return plan
+
+    template_key = textify(template.get("product_type_key"))
+    template_label = textify(template.get("product_type_label"))
+    dimensions = [item for item in (template.get("dimensions") or []) if isinstance(item, dict)]
+    report_outline = unique_strings(template.get("report_outline") or [])
+    source_priority = [item for item in (template.get("source_priority") or []) if isinstance(item, dict)]
+
+    if template_key:
+        plan.analysis_template_key = template_key
+    if template_label:
+        plan.analysis_template_label = template_label
+    plan.analysis_template_path = textify(template.get("_source_path"))
+    plan.analysis_template_summary = textify(template.get("template_basis"))
+    plan.analysis_template_match_score = match_score
+    plan.analysis_dimensions = [
+        {
+            "id": textify(item.get("id")),
+            "label": textify(item.get("label")),
+            "required_evidence": unique_strings(item.get("required_evidence") or []),
+        }
+        for item in dimensions
+    ]
+    plan.analysis_report_outline = report_outline
+
+    fields_by_key: Dict[str, ProductCollectionField] = {field.key: field for field in plan.fields}
+    for dimension in dimensions:
+        field = field_from_analysis_dimension(dimension)
+        fields_by_key.setdefault(field.key, field)
+        plan.generated_search_terms = unique_strings([*plan.generated_search_terms, *field.search_terms])
+        plan.evidence_keywords = unique_strings([*plan.evidence_keywords, *field.search_terms])
+    plan.fields = list(fields_by_key.values())
+
+    if report_outline:
+        plan.report_focus = unique_strings(
+            [
+                *plan.report_focus,
+                f"已加载“{template_label or template_key}”分析模板，报告应覆盖：{', '.join(report_outline)}。",
+            ]
+        )
+    if dimensions:
+        plan.report_focus = unique_strings(
+            [
+                *plan.report_focus,
+                "模板维度只决定优先证据，不会把未采到的信息写成事实；缺失维度进入信息缺口。",
+            ]
+        )
+    for source in source_priority:
+        tier = textify(source.get("tier"))
+        name = textify(source.get("name"))
+        use_for = "、".join(unique_strings(source.get("use_for") or []))
+        if tier or name or use_for:
+            plan.source_policy_notes.append(
+                f"{tier} {name}: 优先用于 {use_for or '对应模板维度'}；事实必须保留来源 URL、标题和采集时间。"
+            )
+    plan.source_policy_notes = unique_strings(plan.source_policy_notes)
+    return plan
 
 
 def build_competitor_discovery_strategies(category_label: str) -> List[CompetitorDiscoveryStrategy]:
@@ -1545,6 +1713,31 @@ def infer_product_category(
 ) -> Tuple[str, str, str]:
     haystack = " ".join([own_product_name, own_product_positioning, own_product_context, *competitors]).lower()
     compact = re.sub(r"\s+", "", haystack)
+    autonomous_vehicle_tokens = [
+        "robotaxi",
+        "self-driving",
+        "driverless",
+        "autonomous vehicle",
+        "autonomous driving",
+        "waymo",
+        "cruise",
+        "zoox",
+        "pony.ai",
+        "weride",
+        "apollo go",
+        "rt6",
+        "无人车",
+        "自动驾驶",
+        "自动驾驶出租车",
+        "萝卜快跑",
+        "小马智行",
+        "文远知行",
+        "无人驾驶",
+        "车机",
+        "自驶",
+        "传感器布局",
+        "远程监控",
+    ]
     snow_helmet_tokens = [
         "helmet",
         "helmets",
@@ -1583,6 +1776,12 @@ def infer_product_category(
         "自动化",
         "工作流",
     ]
+    if any(token in haystack or token in compact for token in autonomous_vehicle_tokens):
+        return (
+            "autonomous_vehicle_robotaxi",
+            "无人车/Robotaxi/自动驾驶整车",
+            "我方定位或竞品名包含无人车、Robotaxi、自动驾驶、整车平台或运营场景信号，采集重点应覆盖官方参数、城市运营、商业化、安全合规、乘坐体验、复杂场景、运维和舆情证据。",
+        )
     if any(token in haystack or token in compact for token in snow_helmet_tokens):
         return (
             "snow_helmet",
@@ -1732,7 +1931,117 @@ def build_product_collection_plan(
         "P3 社媒、论坛、目录站、SEO 聚合只做低置信线索，默认不进入正文证据池。",
     ]
 
-    if category == "snow_helmet":
+    if category == "autonomous_vehicle_robotaxi":
+        search_templates += [
+            "{name} official robotaxi product specs service area pricing",
+            "{name} autonomous vehicle sensor compute platform safety report",
+            "{name} robotaxi city operation fare waiting time coverage",
+            "{name} autonomous driving permit regulator safety incident",
+            "{name} robotaxi ride experience review video",
+            "{name} public opinion acceptance employment privacy safety",
+        ]
+        cn_search_templates += [
+            "{name} 无人车 官网 参数 运营 城市 价格",
+            "{name} 自动驾驶 传感器 算力 安全 合规",
+            "{name} Robotaxi 试乘 等待时间 路线 体验",
+            "{name} 无人车 舆情 事故 隐私 就业 争议",
+            "{name} 车辆平台 续航 补能 运维 OTA",
+        ]
+        image_terms += [
+            "robotaxi vehicle exterior",
+            "robotaxi cabin screen",
+            "autonomous vehicle sensor suite",
+            "ride hailing app screenshot",
+            "service area map",
+            "无人车 外观",
+            "车内屏",
+            "传感器布局",
+            "服务区地图",
+        ]
+        report_focus += [
+            "横向比较产品定位、市场运营、价格商业化、整车平台、自动驾驶系统、安全合规、乘坐体验、复杂场景表现、智舱交互、运维效率、社会接受度和更新节奏。",
+            "视频和社媒只在有竞品、场景、时间点和截图/转写证据时进入报告；否则只作为待核实线索。",
+        ]
+        generated_search_terms += [
+            "robotaxi official specs",
+            "autonomous vehicle safety report",
+            "service area city coverage",
+            "fare pricing subsidy",
+            "sensor suite lidar camera radar",
+            "compute platform TOPS",
+            "remote assistance monitoring",
+            "ride experience waiting time",
+            "edge cases construction cone unprotected turn",
+            "fleet size operations",
+            "regulatory permit autonomous vehicle",
+            "public opinion employment privacy safety",
+            "无人车 官网 参数",
+            "自动驾驶 传感器 算力",
+            "Robotaxi 运营城市 服务范围",
+            "计费规则 优惠补贴",
+            "安全报告 监管许可",
+            "试乘 等待时间 路线",
+            "复杂场景 施工 锥桶 无保护转弯",
+            "远程监控 运维 补能 OTA",
+            "舆论 热搜 隐私 就业争议",
+        ]
+        evidence_keywords += [
+            "robotaxi",
+            "autonomous vehicle",
+            "self-driving",
+            "driverless",
+            "service area",
+            "city coverage",
+            "fare",
+            "fleet",
+            "sensor",
+            "lidar",
+            "radar",
+            "camera",
+            "compute",
+            "TOPS",
+            "safety report",
+            "permit",
+            "remote assistance",
+            "waiting time",
+            "ride experience",
+            "无人车",
+            "自动驾驶",
+            "自动驾驶出租车",
+            "运营城市",
+            "服务范围",
+            "计费规则",
+            "车辆规模",
+            "传感器",
+            "算力",
+            "冗余",
+            "安全报告",
+            "监管许可",
+            "远程监控",
+            "试乘",
+            "等待时间",
+            "路线",
+            "运维",
+            "舆情",
+        ]
+        dynamic_exclude_keywords += [
+            "遥控车",
+            "玩具车",
+            "模型车",
+            "科幻电影",
+            "游戏 MOD",
+            "无人机",
+            "agv 仓储",
+            "叉车",
+            "toy car",
+            "rc car",
+            "drone",
+            "forklift",
+        ]
+        source_policy_notes += [
+            "无人车/Robotaxi 模板会优先使用官方、监管、运营和实测视频证据；社媒观点必须保留公开视频时间点或截图。",
+        ]
+    elif category == "snow_helmet":
         fields += PHYSICAL_PRODUCT_FIELDS + SNOW_HELMET_FIELDS
         search_templates += [
             "{name} official helmet specs weight size colors certification",
@@ -2006,6 +2315,13 @@ def build_product_collection_plan(
         directed_source_search_templates=build_directed_source_search_templates(category),
         value_judgment_rules=build_value_judgment_rules(),
     )
+    plan = apply_analysis_template_to_collection_plan(
+        plan,
+        competitors,
+        own_product_name,
+        own_product_positioning,
+        own_product_context,
+    )
     plan.search_term_reasons = search_term_reason_rows(plan, plan.generated_search_terms, "rule")
     return plan
 
@@ -2094,6 +2410,8 @@ def source_policy_tier_for(source_kind: str, page_role: str = "") -> str:
         return "P2 应用商店/垂直平台验证来源"
     if page_role in {"video_or_social_content", "forum_or_community_discussion"}:
         return "P3 社区/社媒/视频线索"
+    if page_role == "autonomous_vehicle_detail":
+        return "P1 无人车运营/参数/实测来源"
     if source_kind in {"trusted_public", "third_party_verification_source"}:
         return "P2 第三方验证来源"
     if source_kind == "community_or_social_signal":
@@ -2120,6 +2438,8 @@ def fact_type_for(page_role: str, matched_fields: Sequence[str], text: str = "")
         return "customer_case_gtm"
     if page_role in {"product_specs_or_features", "physical_product_detail", "ai_capability_detail"}:
         return "product_capability_specs"
+    if page_role == "autonomous_vehicle_detail":
+        return "autonomous_vehicle_competitor_evidence"
     if page_role == "app_store_listing":
         return "app_store_metadata"
     if page_role == "video_or_social_content":
@@ -2142,6 +2462,7 @@ def increment_type_for(page_role: str, matched_fields: Sequence[str], text: str 
         "release_update": "新增版本/功能/发布节奏",
         "customer_case_gtm": "新增客户/场景/GTM",
         "product_capability_specs": "新增参数/规格/能力",
+        "autonomous_vehicle_competitor_evidence": "新增无人车参数/运营/安全/体验证据",
         "app_store_metadata": "新增应用商店/平台元数据",
         "visual_product_evidence": "新增视频/社媒/截图线索",
         "community_user_feedback": "新增社区/论坛用户线索",
@@ -2249,6 +2570,7 @@ def page_has_decision_signal(
         "product_specs_or_features",
         "physical_product_detail",
         "ai_capability_detail",
+        "autonomous_vehicle_detail",
         "app_store_listing",
         "video_or_social_content",
         "forum_or_community_discussion",
@@ -2272,6 +2594,12 @@ def page_has_decision_signal(
                 "integration",
                 "quality",
                 "problem",
+                "robotaxi",
+                "autonomous vehicle",
+                "sensor",
+                "fleet",
+                "permit",
+                "service area",
                 "定价",
                 "价格",
                 "演示",
@@ -2282,6 +2610,13 @@ def page_has_decision_signal(
                 "参数",
                 "规格",
                 "截图",
+                "无人车",
+                "自动驾驶",
+                "运营城市",
+                "服务范围",
+                "传感器",
+                "算力",
+                "监管许可",
             ],
         )
     )
@@ -2304,6 +2639,7 @@ def page_has_increment_signal(
         "product_specs_or_features",
         "physical_product_detail",
         "ai_capability_detail",
+        "autonomous_vehicle_detail",
         "app_store_listing",
         "video_or_social_content",
         "forum_or_community_discussion",
@@ -2326,6 +2662,11 @@ def page_has_increment_signal(
                 "alternative",
                 "release",
                 "version",
+                "sensor suite",
+                "service area",
+                "fleet size",
+                "waiting time",
+                "safety report",
                 "价格",
                 "额度",
                 "尺码",
@@ -2335,6 +2676,11 @@ def page_has_increment_signal(
                 "对比",
                 "替代",
                 "版本",
+                "运营城市",
+                "服务范围",
+                "等待时间",
+                "传感器",
+                "安全报告",
             ],
         )
     )
@@ -2654,6 +3000,34 @@ def page_role_for_result(
     if plan and plan.category == "ai_software":
         if keyword_hits(haystack, ["integrations", "models", "workflow", "automation", "quota", "credits", "集成", "模型", "工作流", "额度"]):
             return "ai_capability_detail"
+    if plan and plan.category == "autonomous_vehicle_robotaxi":
+        if keyword_hits(
+            haystack,
+            [
+                "robotaxi",
+                "autonomous vehicle",
+                "self-driving",
+                "driverless",
+                "service area",
+                "city coverage",
+                "sensor",
+                "lidar",
+                "compute",
+                "fleet",
+                "permit",
+                "safety report",
+                "无人车",
+                "自动驾驶",
+                "运营城市",
+                "服务范围",
+                "传感器",
+                "算力",
+                "安全报告",
+                "监管许可",
+                "试乘",
+            ],
+        ):
+            return "autonomous_vehicle_detail"
     if any(token in haystack for token in ("review", "alternatives", "compare", "comparison", "评价", "评测", "替代品", "对比")):
         return "review_or_comparison"
     if any(token in haystack for token in ("blog", "news", "press", "funding", "launch", "融资", "发布", "新闻")):
@@ -2738,6 +3112,7 @@ def evidence_decision_for_result(
         "product_specs_or_features",
         "physical_product_detail",
         "ai_capability_detail",
+        "autonomous_vehicle_detail",
         "app_store_listing",
     }
     signal_roles = {"video_or_social_content", "forum_or_community_discussion"}
@@ -5149,7 +5524,12 @@ def row_requires_login_action(row: Mapping[str, Any]) -> bool:
         textify(row.get("requires_user_login")).lower() == "yes"
         or textify(row.get("review_reason")) == "login_required_user_action"
         or textify(row.get("page_role")) == "auth_or_account_shell"
-        or status in {"requires_user_login", "login_assisted_snapshot_captured", "login_assist_still_requires_login"}
+        or status in {
+            "requires_user_login",
+            "awaiting_user_login",
+            "login_assisted_snapshot_captured",
+            "login_assist_still_requires_login",
+        }
         or status.startswith("login_assist")
         or "auth_or_transaction_shell" in hard_gate
     )
@@ -5168,10 +5548,42 @@ def review_target_url(row: Mapping[str, Any]) -> str:
     return ""
 
 
+def login_queue_key_for(row: Mapping[str, Any]) -> Tuple[str, str]:
+    url = review_target_url(row)
+    domain = domain_of(url)
+    competitor = textify(row.get("competitor"))
+    return competitor, domain or canonical_url_for_dedupe(url) or url
+
+
+def dedupe_login_review_rows(rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    deduped: List[Dict[str, Any]] = []
+    by_key: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    queued_urls: Dict[Tuple[str, str], List[str]] = {}
+    for row in rows:
+        if not row_requires_login_action(row):
+            continue
+        url = review_target_url(row)
+        if not url:
+            continue
+        key = login_queue_key_for(row)
+        if key not in by_key:
+            by_key[key] = dict(row)
+            queued_urls[key] = []
+            deduped.append(by_key[key])
+        if url not in queued_urls[key]:
+            queued_urls[key].append(url)
+    for row in deduped:
+        key = login_queue_key_for(row)
+        urls = queued_urls.get(key, [])
+        row["queued_urls"] = "\n".join(urls)
+        row["queued_url_count"] = str(len(urls) or 1)
+    return deduped
+
+
 def login_review_next_step() -> str:
     return (
-        "系统可弹出浏览器打开该页面；请使用你有权限的账号完成登录/注册并确认页面是否有产品事实。"
-        "登录等待期内如果页面变成可读内容，工具会保存文本快照和截图；如果仍不可读，结束时保留在问题页面核验清单。"
+        "系统会把同站点登录页合并到集中等待区；请使用你有权限的账号完成登录/注册并确认页面是否有产品事实。"
+        "公开页面采集结束后的登录等待期内，如果页面变成可读内容，工具会保存文本快照和截图；如果仍不可读，结束时保留在问题页面核验清单。"
     )
 
 
@@ -5248,10 +5660,10 @@ def rows_from_manual_review_queue(
     rows = []
     seen = set()
     for page in pages:
+        seen.add((page.competitor, page.url))
         reason = manual_review_reason(page)
         if not reason:
             continue
-        seen.add((page.competitor, page.url))
         rows.append(
             {
                 "competitor": page.competitor,
@@ -5332,7 +5744,7 @@ def write_manual_review_queue(path: Path, rows: Sequence[Dict[str, Any]]) -> Non
         "",
         "处理原则：先在 GUI/浏览器中打开原网页，判断是否确实是公开且有产品情报价值的内容；确认有价值后，再通过合规方式补证，例如同站公开导航、sitemap、官方文档/API、帮助中心、公开静态页、可下载公开资料或人工摘录公开可见内容。",
         "",
-        "遇到登录/注册页时，工具可以弹出浏览器让用户使用自己有权限的账号处理；登录后如页面变为可读内容，会保存快照和截图，否则合并到问题页面核验清单。",
+        "遇到登录/注册页时，工具会先按竞品和域名去重放入登录等待区，公开页面继续采集；网页抓取结束后统一等待用户登录并复用同一浏览器登录态保存快照，否则合并到问题页面核验清单。",
         "",
         "边界：不破解验证码，不绕过登录/付费/访问控制，不保存账号凭据，不调用未授权私有接口，不采集私密或违法内容。",
         "",
@@ -5559,6 +5971,92 @@ def read_snapshot_excerpt(path: str, limit: int = 700) -> str:
         return ""
 
 
+GUI_REVIEW_PAGE_STATUSES = {
+    "browser_snapshot_captured",
+    "captured_public_snapshot",
+    "login_assisted_snapshot_captured",
+    "adapter_metadata_captured",
+}
+
+
+def title_from_snapshot_text(text: str) -> str:
+    match = re.search(r"^\s*Title:\s*(.+?)\s*$", textify(text), re.I | re.M)
+    return truncate_text(match.group(1), 180) if match else ""
+
+
+def page_extracts_from_gui_review_rows(
+    gui_review_rows: Sequence[Mapping[str, Any]],
+    collection_plan: Optional[ProductCollectionPlan] = None,
+) -> List[PageExtract]:
+    pages: List[PageExtract] = []
+    seen = set()
+    for row in gui_review_rows:
+        status = textify(row.get("automated_review_status")).lower()
+        if status not in GUI_REVIEW_PAGE_STATUSES:
+            continue
+        text_path = textify(row.get("text_snapshot_path"))
+        if not text_path:
+            continue
+        try:
+            raw_text = Path(text_path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        markdown = clean_text(raw_text, limit=30000)
+        if not markdown:
+            continue
+        url = textify(row.get("canonical_url")) or review_target_url(row)
+        if not url:
+            continue
+        title = textify(row.get("title")) or title_from_snapshot_text(markdown) or url
+        if looks_like_login_form(url, title, markdown):
+            continue
+        key = (textify(row.get("competitor")), url)
+        if key in seen:
+            continue
+        seen.add(key)
+        image_urls: List[str] = []
+        screenshot_path = textify(row.get("screenshot_path"))
+        if screenshot_path:
+            image_urls.append(screenshot_path)
+        fields = infer_fields(markdown, collection_plan)
+        fields.update(
+            {
+                "snapshot_source": "gui_review",
+                "snapshot_status": status,
+                "screenshot_path": screenshot_path,
+            }
+        )
+        pages.append(
+            PageExtract(
+                competitor=key[0],
+                url=url,
+                title=title,
+                markdown=markdown,
+                text_excerpt=truncate_text(markdown, 2000),
+                links=[],
+                image_urls=image_urls,
+                fields=fields,
+                error="",
+            )
+        )
+    return pages
+
+
+def merge_page_extracts(
+    pages: Sequence[PageExtract],
+    additions: Sequence[PageExtract],
+) -> List[PageExtract]:
+    merged = list(pages)
+    seen = {(page.competitor, page.url) for page in merged}
+    for page in additions:
+        key = (page.competitor, page.url)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(page)
+    return merged
+
+
 def login_assisted_browser_snapshot(
     url: str,
     out_dir: Path,
@@ -5671,6 +6169,279 @@ def login_assisted_browser_snapshot(
             encoding="utf-8",
         )
         return "", str(note_path), "requires_user_login", f"login_assist_failed:{exc}"
+
+
+class LoginAssistSession:
+    def __init__(
+        self,
+        out_dir: Path,
+        proxy_url: str = "",
+        timeout: int = 12,
+    ) -> None:
+        self.out_dir = Path(out_dir)
+        self.proxy_url = proxy_url
+        self.timeout = max(3, int(timeout or 12))
+        self.profile_dir = self.out_dir / "login_assist_profile"
+        self.snapshot_dir = self.out_dir / "gui_review_snapshots"
+        self.snapshot_dir.mkdir(parents=True, exist_ok=True)
+        self.rows_by_key: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self.queued_urls_by_key: Dict[Tuple[str, str], List[str]] = {}
+        self.pages_by_key: Dict[Tuple[str, str], Any] = {}
+        self.results_by_key: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self.playwright: Any = None
+        self.context: Any = None
+        self.start_error = ""
+
+    def start(self) -> bool:
+        if self.context is not None:
+            return True
+        try:
+            from playwright.sync_api import sync_playwright
+
+            self.playwright = sync_playwright().start()
+            launch_kwargs: Dict[str, Any] = {"headless": False}
+            if self.proxy_url:
+                launch_kwargs["proxy"] = {"server": self.proxy_url}
+            self.context = self.playwright.chromium.launch_persistent_context(
+                user_data_dir=str(self.profile_dir),
+                viewport={"width": 1365, "height": 900},
+                **launch_kwargs,
+            )
+            print("[LOGIN] Login assist browser opened once; queued pages will reuse this logged-in profile.", flush=True)
+            return True
+        except Exception as exc:
+            self.start_error = f"login_assist_start_failed:{exc}"
+            self.close()
+            print(f"[LOGIN] Login assist browser unavailable: {exc}", flush=True)
+            return False
+
+    def add_rows(self, rows: Sequence[Mapping[str, Any]]) -> int:
+        added = 0
+        for row in dedupe_login_review_rows(rows):
+            url = review_target_url(row)
+            if not url:
+                continue
+            key = login_queue_key_for(row)
+            if key in self.rows_by_key:
+                for queued_url in textify(row.get("queued_urls")).splitlines() or [url]:
+                    if queued_url and queued_url not in self.queued_urls_by_key[key]:
+                        self.queued_urls_by_key[key].append(queued_url)
+                self.rows_by_key[key]["queued_url_count"] = str(len(self.queued_urls_by_key[key]))
+                self.rows_by_key[key]["queued_urls"] = "\n".join(self.queued_urls_by_key[key])
+                continue
+            item = dict(row)
+            queued_urls = [value for value in textify(row.get("queued_urls")).splitlines() if value] or [url]
+            self.rows_by_key[key] = item
+            self.queued_urls_by_key[key] = list(dict.fromkeys(queued_urls))
+            item["queued_url_count"] = str(len(self.queued_urls_by_key[key]))
+            item["queued_urls"] = "\n".join(self.queued_urls_by_key[key])
+            added += 1
+            if self.start():
+                self._open_or_reuse_page(key, review_target_url(item))
+        if added:
+            print(f"[LOGIN] Added {added} unique login-required site(s) to the login queue.", flush=True)
+        return added
+
+    def _open_or_reuse_page(self, key: Tuple[str, str], url: str) -> Any:
+        if not self.context or not url:
+            return None
+        page = self.pages_by_key.get(key)
+        should_navigate = False
+        try:
+            if page is None or page.is_closed():
+                blank_pages = [candidate for candidate in self.context.pages if candidate.url == "about:blank"]
+                page = blank_pages[0] if blank_pages else self.context.new_page()
+                self.pages_by_key[key] = page
+                should_navigate = True
+            else:
+                try:
+                    should_navigate = textify(page.url) == "about:blank"
+                except Exception:
+                    should_navigate = True
+            if should_navigate:
+                page.goto(url, wait_until="domcontentloaded", timeout=self.timeout * 1000)
+        except Exception as exc:
+            self.results_by_key[key] = self._result_from_row(
+                self.rows_by_key[key],
+                "awaiting_user_login",
+                next_step=f"登录页已进入等待区，页面打开可能较慢或被重定向：{exc}",
+            )
+        return page
+
+    def _result_from_row(
+        self,
+        row: Mapping[str, Any],
+        status: str,
+        text_path: str = "",
+        screenshot_path: str = "",
+        excerpt: str = "",
+        next_step: str = "",
+    ) -> Dict[str, Any]:
+        url = review_target_url(row)
+        return {
+            "competitor": textify(row.get("competitor")),
+            "priority": textify(row.get("priority")) or "P0-LOGIN",
+            "review_reason": textify(row.get("review_reason")) or "login_required_user_action",
+            "requires_user_login": "yes",
+            "title": textify(row.get("title")),
+            "url": url,
+            "domain": domain_of(url) or textify(row.get("domain")),
+            "adapter_name": "",
+            "source_family": "",
+            "platform": "",
+            "canonical_url": url,
+            "automated_review_status": status,
+            "text_snapshot_path": text_path,
+            "screenshot_path": screenshot_path,
+            "metadata_path": "",
+            "transcript_path": "",
+            "evidence_markers_path": "",
+            "needs_manual_video_timestamp": "no",
+            "login_assist_url": url,
+            "text_snapshot_excerpt": excerpt,
+            "allowed_boundary": textify(row.get("allowed_boundary")) or login_review_allowed_boundary(),
+            "next_step": next_step or login_review_next_step(),
+            "queued_url_count": textify(row.get("queued_url_count")) or "1",
+            "queued_urls": textify(row.get("queued_urls")) or url,
+        }
+
+    def queue_rows(self) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        for key, row in self.rows_by_key.items():
+            result = self.results_by_key.get(key)
+            if result and textify(result.get("automated_review_status")) == "login_assisted_snapshot_captured":
+                continue
+            pending = self._result_from_row(
+                row,
+                textify(result.get("automated_review_status")) if result else "awaiting_user_login",
+                text_path=textify(result.get("text_snapshot_path")) if result else "",
+                screenshot_path=textify(result.get("screenshot_path")) if result else "",
+                excerpt=textify(result.get("text_snapshot_excerpt")) if result else "",
+                next_step=textify(result.get("next_step")) if result else "已加入登录等待区；公开页面继续采集，登录等待截止到网页抓取结束后 120 秒。",
+            )
+            pending["queued_url_count"] = str(len(self.queued_urls_by_key.get(key, [])) or 1)
+            pending["queued_urls"] = "\n".join(self.queued_urls_by_key.get(key, [])) or pending["url"]
+            rows.append(pending)
+        return rows
+
+    def capture_all(self, wait_seconds: int = 120) -> List[Dict[str, Any]]:
+        if not self.rows_by_key:
+            return []
+        if not self.context and not self.start():
+            rows = []
+            for key, row in self.rows_by_key.items():
+                result = self._result_from_row(
+                    row,
+                    "requires_user_login",
+                    next_step=f"登录辅助浏览器不可用，已保留在需登录队列：{self.start_error}",
+                )
+                self.results_by_key[key] = result
+                rows.append(result)
+            return rows
+
+        wait_seconds = max(0, int(wait_seconds or 0))
+        print(f"[LOGIN] Waiting up to {wait_seconds}s after public crawling for queued login pages.", flush=True)
+        pending = set(self.rows_by_key)
+        stable_checks: Dict[Tuple[str, str], int] = {key: 0 for key in pending}
+        deadline = time.time() + wait_seconds
+        while pending and time.time() < deadline:
+            for key in list(pending):
+                row = self.rows_by_key[key]
+                page = self._open_or_reuse_page(key, review_target_url(row))
+                readable, title, cleaned = self._readable_snapshot(page, row)
+                if readable:
+                    stable_checks[key] = stable_checks.get(key, 0) + 1
+                    if stable_checks[key] >= 2:
+                        pending.remove(key)
+                else:
+                    stable_checks[key] = 0
+            if pending:
+                time.sleep(2.5)
+
+        rows: List[Dict[str, Any]] = []
+        for index, (key, row) in enumerate(self.rows_by_key.items(), start=1):
+            page = self.pages_by_key.get(key)
+            status, text_path, screenshot_path, excerpt, next_step = self._capture_page(index, page, row)
+            result = self._result_from_row(
+                row,
+                status,
+                text_path=text_path,
+                screenshot_path=screenshot_path,
+                excerpt=excerpt,
+                next_step=next_step,
+            )
+            self.results_by_key[key] = result
+            rows.append(result)
+        return rows
+
+    def _readable_snapshot(self, page: Any, row: Mapping[str, Any]) -> Tuple[bool, str, str]:
+        if page is None:
+            return False, "", ""
+        try:
+            title = textify(page.title())
+        except Exception:
+            title = ""
+        try:
+            body_text = textify(page.locator("body").inner_text(timeout=4000))
+        except Exception:
+            body_text = ""
+        cleaned = clean_text(body_text, limit=10000)
+        page_url = ""
+        try:
+            page_url = textify(page.url)
+        except Exception:
+            page_url = review_target_url(row)
+        readable = bool(cleaned and not looks_like_login_form(page_url, title, cleaned) and len(cleaned) >= 240)
+        return readable, title, cleaned
+
+    def _capture_page(self, index: int, page: Any, row: Mapping[str, Any]) -> Tuple[str, str, str, str, str]:
+        url = review_target_url(row)
+        slug = f"{index:03d}-{slugify(textify(row.get('competitor')) or domain_of(url) or 'login')}"
+        screenshot_path = self.snapshot_dir / f"{slug}-login-assisted.png"
+        text_path = self.snapshot_dir / f"{slug}-login-assisted.txt"
+        readable, title, cleaned = self._readable_snapshot(page, row)
+        screenshot_file = ""
+        if page is not None:
+            try:
+                page.screenshot(path=str(screenshot_path), full_page=True)
+                screenshot_file = str(screenshot_path)
+            except Exception:
+                screenshot_file = ""
+        if cleaned:
+            snapshot = "\n".join(part for part in [f"Title: {title}" if title else "", cleaned] if part)
+            text_path.write_text(snapshot, encoding="utf-8")
+            text_file = str(text_path)
+        else:
+            text_file = ""
+        if readable:
+            return (
+                "login_assisted_snapshot_captured",
+                text_file,
+                screenshot_file,
+                read_snapshot_excerpt(text_file),
+                "登录后页面已保存文本快照和截图；已重新纳入分析候选。",
+            )
+        return (
+            "login_assist_timeout",
+            text_file,
+            screenshot_file,
+            read_snapshot_excerpt(text_file),
+            "公开页面采集已结束并等待登录超时；该站点保留到问题页面核验清单。",
+        )
+
+    def close(self) -> None:
+        try:
+            if self.context is not None:
+                self.context.close()
+        except Exception:
+            pass
+        self.context = None
+        try:
+            if self.playwright is not None:
+                self.playwright.stop()
+        except Exception:
+            pass
+        self.playwright = None
 
 
 def execute_gui_review_queue(
@@ -5858,7 +6629,7 @@ def write_gui_review_results_markdown(path: Path, rows: Sequence[Mapping[str, An
     lines = [
         "# GUI 自动复核结果",
         "",
-        "本文件记录问题页面核验清单的内部自动公开快照结果。公开页会直接保存文本或截图；登录/注册页会提示用户用有权限的账号处理，成功后保存登录辅助快照。",
+        "本文件记录问题页面核验清单的内部自动公开快照结果。公开页会直接保存文本或截图；登录/注册页会进入集中登录队列，用户授权后保存登录辅助快照。",
         "",
         "边界：不破解验证码，不绕过登录、付费墙或访问控制，不保存账号凭据，不做未授权私有接口逆向。",
         "",
@@ -5900,29 +6671,32 @@ def login_required_queue_rows(
     gui_review_rows: Sequence[Mapping[str, Any]],
 ) -> List[Dict[str, Any]]:
     gui_by_key = {
-        (textify(row.get("competitor")), review_target_url(row)): row
+        login_queue_key_for(row): row
         for row in gui_review_rows
     }
     rows: List[Dict[str, Any]] = []
     seen = set()
-    for row in manual_review_rows:
+    for row in dedupe_login_review_rows(manual_review_rows):
         if not row_requires_login_action(row):
             continue
         target_url = review_target_url(row)
-        key = (textify(row.get("competitor")), target_url)
+        key = login_queue_key_for(row)
         if key in seen:
             continue
         seen.add(key)
         gui = gui_by_key.get(key, {})
+        if textify(gui.get("automated_review_status")).lower() == "login_assisted_snapshot_captured":
+            continue
         rows.append(
             {
                 "competitor": key[0],
                 "priority": textify(row.get("priority")) or "P0-LOGIN",
                 "review_reason": textify(row.get("review_reason")) or "login_required_user_action",
                 "title": textify(row.get("title")),
-                "url": key[1],
-                "domain": domain_of(key[1]) or textify(row.get("domain")),
-                "login_assist_url": key[1],
+                "url": target_url,
+                "domain": domain_of(target_url) or textify(row.get("domain")),
+                "queued_url_count": textify(row.get("queued_url_count")) or "1",
+                "login_assist_url": target_url,
                 "automated_review_status": textify(gui.get("automated_review_status")) or "requires_user_login",
                 "text_snapshot_path": textify(gui.get("text_snapshot_path")),
                 "screenshot_path": textify(gui.get("screenshot_path")),
@@ -5938,7 +6712,7 @@ def write_login_required_queue(path: Path, rows: Sequence[Mapping[str, Any]]) ->
     lines = [
         "# 需登录队列",
         "",
-        "这些页面疑似需要登录、注册、验证码或账号权限。工具会尝试弹出浏览器交给用户处理；登录后可读的内容会保存快照，仍不可读的会留在本队列。",
+        "这些页面疑似需要登录、注册、验证码或账号权限。工具会按竞品和域名去重，统一放入登录等待区；公开页面会继续采集。登录后可读的内容会保存快照，仍不可读的会留在本队列。",
         "",
         "边界：只处理用户本人有权限访问的信息，不破解验证码，不绕过登录/付费/访问控制，不保存账号凭据。",
         "",
@@ -5947,8 +6721,8 @@ def write_login_required_queue(path: Path, rows: Sequence[Mapping[str, Any]]) ->
         lines += ["本轮没有检测到需登录页面。", ""]
     else:
         lines += [
-            "| 优先级 | 竞品 | 状态 | URL | 快照 | 截图 | 下一步 |",
-            "|---|---|---|---|---|---|---|",
+            "| 优先级 | 竞品 | 状态 | 同站点排队 URL | URL | 快照 | 截图 | 下一步 |",
+            "|---|---|---|---:|---|---|---|---|",
         ]
         for row in rows:
             lines.append(
@@ -5959,6 +6733,7 @@ def write_login_required_queue(path: Path, rows: Sequence[Mapping[str, Any]]) ->
                         row.get("priority"),
                         row.get("competitor"),
                         row.get("automated_review_status"),
+                        row.get("queued_url_count") or "1",
                         row.get("url"),
                         row.get("text_snapshot_path") or "无",
                         row.get("screenshot_path") or "无",
@@ -6238,6 +7013,20 @@ def dimension_for_field(field_key: str) -> str:
         return "security"
     if field_key in {"customers", "gtm_channel"}:
         return "gtm_customer"
+    if field_key in {"av_positioning", "av_market_operations", "av_release_tracking"}:
+        return "autonomous_vehicle_market_operations"
+    if field_key in {"av_pricing_commercialization"}:
+        return "autonomous_vehicle_commercialization"
+    if field_key in {"av_vehicle_platform", "av_autonomous_system"}:
+        return "autonomous_vehicle_technology_specs"
+    if field_key in {"av_safety_compliance"}:
+        return "autonomous_vehicle_safety_compliance"
+    if field_key in {"av_ride_experience", "av_edge_case_performance", "av_hmi_cabin"}:
+        return "autonomous_vehicle_user_experience"
+    if field_key in {"av_operations_maintenance"}:
+        return "autonomous_vehicle_operations"
+    if field_key in {"av_public_opinion"}:
+        return "autonomous_vehicle_public_opinion"
     return "product_capability"
 
 
@@ -6281,6 +7070,18 @@ RAW_STRUCTURED_FIELD_KEYS = {
     "models_capabilities",
     "usage_quota_limits",
     "security_privacy_deployment",
+    "av_positioning",
+    "av_market_operations",
+    "av_pricing_commercialization",
+    "av_vehicle_platform",
+    "av_autonomous_system",
+    "av_safety_compliance",
+    "av_ride_experience",
+    "av_edge_case_performance",
+    "av_hmi_cabin",
+    "av_operations_maintenance",
+    "av_public_opinion",
+    "av_release_tracking",
 }
 
 
@@ -7383,6 +8184,33 @@ def write_pre_crawl_plan(
     for competitor in competitors:
         lines.append(f"- {competitor}")
 
+    if plan.analysis_template_key:
+        lines += [
+            "",
+            "## 已加载分析模板",
+            "",
+            f"- **模板:** {plan.analysis_template_label or plan.analysis_template_key}",
+            f"- **匹配分:** {plan.analysis_template_match_score}",
+            f"- **路径:** `{plan.analysis_template_path}`",
+        ]
+        if plan.analysis_template_summary:
+            lines.append(f"- **说明:** {plan.analysis_template_summary}")
+        if plan.analysis_report_outline:
+            lines += [
+                "",
+                "**报告参考结构:** " + "、".join(plan.analysis_report_outline),
+            ]
+        if plan.analysis_dimensions:
+            lines += [
+                "",
+                "| 维度 | 必须寻找的证据 |",
+                "|---|---|",
+            ]
+            for item in plan.analysis_dimensions:
+                lines.append(
+                    f"| {md_cell(item.get('label') or item.get('id'))} | {md_cell('、'.join(item.get('required_evidence') or []))} |"
+                )
+
     if plan.search_cards_applied:
         lines += [
             "",
@@ -8338,7 +9166,7 @@ def write_methodology(
         "- **噪声控制:** 社交媒体、百科、登录/注册、购物车、账号中心、市场导航、目录站、SEO 聚合、论坛导航、低相关页面会被降权或排除。",
         "- **反样本保留:** 被排除内容仍会进入 `all_sources.csv`、`unfiltered_collection.md` 或 `evidence_audit.csv`，便于追溯为什么不要。",
         "- **问题页面核验:** 反爬、403、Cloudflare、验证码、JS 壳、低文本、登录超时、视频缺时间点和待核实来源统一进入 `问题页面核验清单.md/csv`，先由人工确认是否公开、是否有价值、是否需要补证，再决定 include / verify_later / exclude。",
-        "- **登录辅助:** 登录页、注册页和账号权限页也会合并进 `问题页面核验清单.md/csv`；开启 `--login-assist` 后，工具会弹出浏览器让用户用有权限的账号登录，等待后可读则保存快照，仍不可读则标记为超时未人工登录或需账号权限。",
+        "- **登录辅助:** 登录页、注册页和账号权限页会先进入 `需登录队列.md/csv`，按竞品和域名去重；开启 `--login-assist` 后，工具复用同一个可见浏览器登录态，公开页面采集结束后统一等待，登录后可读则保存快照，仍不可读则标记为超时未人工登录或需账号权限。",
         "- **合规边界:** 可使用站点公开导航、sitemap、官方文档/API、帮助中心、静态页、公开下载资料或人工摘录公开/授权可见内容；不破解验证码、不绕过登录/付费/访问控制、不保存账号凭据、不调用未授权私有接口。",
         "",
         "## 4. 页面内容筛选原则",
@@ -8487,7 +9315,7 @@ def write_anti_bot_strategy_doc(
     lines = [
         "# 反爬与异常页面处理策略",
         "",
-        "本策略优先处理公开可访问的信息源。遇到登录/注册/账号权限页面时，工具可以弹出浏览器让用户授权处理；它的目标是减少误删有价值页面，而不是破解验证码或绕过站点访问控制。",
+        "本策略优先处理公开可访问的信息源。遇到登录/注册/账号权限页面时，工具先进入集中登录队列，公开页面继续采集；网页抓取结束后统一等待用户授权并复用同一登录态保存快照。它的目标是减少误删有价值页面，而不是破解验证码或绕过站点访问控制。",
         "",
         "## 已观察到的问题类型",
         "",
@@ -8506,7 +9334,7 @@ def write_anti_bot_strategy_doc(
         "2. **搜索定向补证:** 用 SearXNG 针对同一竞品和同一字段重搜，例如 `site:官网域名 pricing`、`site:官网域名 docs API`。",
         "3. **公开元数据:** 视频和社媒先保留公开 URL、标题、作者展示名、发布时间、公开视频元数据；没有时间点、截图或字幕时不能写成强事实。",
         "4. **浏览器公开快照:** 自动打开公开页面并保存文本快照或截图；只记录用户无需登录即可看到的内容。",
-        "5. **登录辅助复核:** 如果页面明确要求登录/注册，弹出浏览器让用户使用自己有权限的账号处理；等待后页面可读则保存快照，仍不可读则进入问题页面核验清单。",
+        "5. **登录辅助复核:** 如果页面明确要求登录/注册，先按竞品和域名去重放入等待区；网页抓取结束后统一等待用户用有权限的账号登录，页面可读则保存快照，仍不可读则进入问题页面核验清单。",
         "6. **人工公开摘录:** 如果机器抓不到但页面公开或授权可见，可以人工摘录关键句，并保留 URL、截图、抓取时间和摘录人。",
         "",
         "## 禁止做的事",
@@ -9089,7 +9917,7 @@ Task:
 11. Pages in `问题页面核验清单.md/csv` are not facts yet. Mention them in section 11 as verification candidates and explain what should be checked before inclusion.
 12. Include why major evidence was included or excluded.
 13. In section 13, analyze our own product direction only from the provided "Own Product Context" plus competitor evidence. If own-product context is missing, clearly say what is missing and do not invent our positioning.
-14. Use the "Pre-Crawl Product-Specific Collection Plan" to decide what matters for this category. For physical products, compare specs/materials/size/color/quality fields when present. For AI/software, compare API/integrations/models/limits/security/deployment fields when present. If a planned field is missing, mark it as 信息缺口.
+14. Use the "Pre-Crawl Product-Specific Collection Plan" to decide what matters for this category. If an analysis template is loaded, treat its dimensions and report outline as the product-specific reference template inside the fixed H2 framework. For physical products, compare specs/materials/size/color/quality fields when present. For AI/software, compare API/integrations/models/limits/security/deployment fields when present. For autonomous vehicle/Robotaxi products, compare official parameters, city operation, commercialization, vehicle platform, autonomous driving system, safety/compliance, ride experience, complex scenarios, HMI/cabin, operations, public opinion, and release tracking when present. If a planned field is missing, mark it as 信息缺口.
 15. Use the rule-generated fact strategy fields in the evidence audit:
    - `primary_evidence_candidate=yes` should be preferred as the cited evidence for a fact group.
    - `pending_verification=yes` cannot be written as Fact; put it in 信息缺口 / 待核实线索 unless independently supported by primary evidence.
@@ -9203,8 +10031,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-gui-review", action="store_true", help="Skip automated public snapshot pass for GUI review candidates.")
     parser.add_argument("--gui-review-max", type=int, default=8, help="Max GUI/manual-review candidates to snapshot automatically.")
     parser.add_argument("--disable-browser-gui", action="store_true", help="Use public text/metadata snapshots only; do not launch a browser for GUI review.")
-    parser.add_argument("--login-assist", action="store_true", help="Open a visible browser for login/register pages so the user can authenticate and continue review.")
-    parser.add_argument("--login-assist-wait", type=int, default=120, help="Seconds to wait for user login before keeping the URL in the login-required queue.")
+    parser.add_argument("--login-assist", action="store_true", help="Queue login/register pages, reuse one visible browser profile, and capture authorized snapshots after public crawling.")
+    parser.add_argument("--login-assist-wait", type=int, default=120, help="Seconds to wait after public page crawling for queued login pages before analysis continues.")
     parser.add_argument("--image-engine", choices=["bing", "baidu", "google"], default="bing", help="icrawler image engine.")
     parser.add_argument("--max-image-downloads", type=int, default=20, help="Downloaded images per competitor via icrawler.")
     parser.add_argument("--image-extra-term", action="append", default=[], help="Extra image search term. Can repeat.")
@@ -9253,6 +10081,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     manual_exclude_keywords = normalize_keyword_inputs(args.manual_exclude_keyword)
     ml_model: Optional[LocalFilterModel] = None
     ml_model_path = Path(args.ml_model).expanduser().resolve() if args.ml_model else DEFAULT_FILTER_MODEL_PATH
+    if (
+        not args.disable_ml_filter
+        and ml_model_path == DEFAULT_FILTER_MODEL_PATH.resolve()
+        and not ml_model_path.exists()
+    ):
+        try:
+            bootstrap = bootstrap_filter_model_if_missing(
+                ml_model_path,
+                [DEFAULT_BOOTSTRAP_LABELS_PATH],
+                min_labeled_rows=3,
+            )
+            if bootstrap.get("created"):
+                print(
+                    f"[0/5] Local training model bootstrapped: {ml_model_path} "
+                    f"({bootstrap.get('training_rows', 0)} seed rows)"
+                )
+        except Exception as exc:
+            print(f"[0/5] Local training model bootstrap skipped: {exc}")
     ml_status = model_status(ml_model_path)
     if args.disable_ml_filter:
         ml_status = {"enabled": False, "path": str(ml_model_path), "message": "disabled by --disable-ml-filter"}
@@ -9451,26 +10297,93 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         args.ml_auto_include_threshold,
         args.ml_auto_exclude_threshold,
     )
-    if args.skip_crawl:
-        print("[2/5] Skipping Crawl4AI.")
-    else:
-        if not urls_to_crawl:
-            print("[2/5] No pages to crawl; skipping Crawl4AI.")
-        else:
-            print(f"[2/5] Crawling {len(urls_to_crawl)} pages with Crawl4AI ...")
-            pages = asyncio.run(
-                crawl_with_crawl4ai(
-                    urls_to_crawl,
-                    args.crawl_concurrency,
-                    args.proxy_url,
-                    collection_plan,
-                    manual_include_keywords,
-                    manual_exclude_keywords,
+    evidence_audit_rows = rows_from_evidence_audit(
+        web_results,
+        urls_to_crawl,
+        args.max_pages,
+        collection_plan,
+        manual_include_keywords,
+        manual_exclude_keywords,
+        ml_model,
+        args.ml_auto_include_threshold,
+        args.ml_auto_exclude_threshold,
+    )
+    gui_review_rows: List[Dict[str, Any]] = []
+    login_session: Optional[LoginAssistSession] = None
+    try:
+        if args.login_assist and not args.skip_gui_review:
+            pre_crawl_manual_review_rows = rows_from_manual_review_queue([], evidence_audit_rows)
+            pre_crawl_login_rows = [
+                row for row in pre_crawl_manual_review_rows
+                if row_requires_login_action(row)
+            ]
+            if pre_crawl_login_rows:
+                print(f"[1.5/5] Queuing {len(pre_crawl_login_rows)} login-required page(s) before Crawl4AI ...")
+                login_session = LoginAssistSession(
+                    out_dir,
+                    proxy_url=args.proxy_url,
+                    timeout=args.timeout,
                 )
-            )
-            pages_ok = len([page for page in pages if not page.error])
-            pages_rejected = len(pages) - pages_ok
-            print(f"      crawled pages: {len(pages)} (usable candidates: {pages_ok}, rejected/blocked: {pages_rejected})")
+                login_session.add_rows(pre_crawl_login_rows)
+                pre_crawl_login_required_rows = login_session.queue_rows()
+                write_login_required_queue(out_dir / "login_required_queue.md", pre_crawl_login_required_rows)
+                write_csv(out_dir / "login_required_queue.csv", pre_crawl_login_required_rows, LOGIN_REQUIRED_FIELDS)
+                print(
+                    f"      login queue: {len(pre_crawl_login_required_rows)} unique site(s); public crawling continues while you log in."
+                )
+
+        if args.skip_crawl:
+            print("[2/5] Skipping Crawl4AI.")
+        else:
+            if not urls_to_crawl:
+                print("[2/5] No pages to crawl; skipping Crawl4AI.")
+            else:
+                print(f"[2/5] Crawling {len(urls_to_crawl)} pages with Crawl4AI ...")
+                pages = asyncio.run(
+                    crawl_with_crawl4ai(
+                        urls_to_crawl,
+                        args.crawl_concurrency,
+                        args.proxy_url,
+                        collection_plan,
+                        manual_include_keywords,
+                        manual_exclude_keywords,
+                    )
+                )
+                pages_ok = len([page for page in pages if not page.error])
+                pages_rejected = len(pages) - pages_ok
+                print(f"      crawled pages: {len(pages)} (usable candidates: {pages_ok}, rejected/blocked: {pages_rejected})")
+
+        if args.login_assist and not args.skip_gui_review:
+            post_crawl_manual_review_rows = rows_from_manual_review_queue(pages, evidence_audit_rows)
+            post_crawl_login_rows = [
+                row for row in post_crawl_manual_review_rows
+                if row_requires_login_action(row)
+            ]
+            if post_crawl_login_rows:
+                if login_session is None:
+                    login_session = LoginAssistSession(
+                        out_dir,
+                        proxy_url=args.proxy_url,
+                        timeout=args.timeout,
+                    )
+                added_login_sites = login_session.add_rows(post_crawl_login_rows)
+                queued_rows = login_session.queue_rows()
+                write_login_required_queue(out_dir / "login_required_queue.md", queued_rows)
+                write_csv(out_dir / "login_required_queue.csv", queued_rows, LOGIN_REQUIRED_FIELDS)
+                print(
+                    f"[2.5/5] Login queue ready: {len(queued_rows)} unique site(s), {added_login_sites} newly added after crawl."
+                )
+                gui_review_rows.extend(login_session.capture_all(wait_seconds=args.login_assist_wait))
+                write_csv(out_dir / "gui_review_results.csv", gui_review_rows, GUI_REVIEW_FIELDS)
+                write_gui_review_results_markdown(out_dir / "gui_review_results.md", gui_review_rows)
+    finally:
+        if login_session is not None:
+            login_session.close()
+
+    login_snapshot_pages = page_extracts_from_gui_review_rows(gui_review_rows, collection_plan)
+    if login_snapshot_pages:
+        pages = merge_page_extracts(pages, login_snapshot_pages)
+        print(f"      logged-in snapshots added to analysis pages: {len(login_snapshot_pages)}")
 
     downloaded_images: List[Dict[str, str]] = []
     if args.skip_images:
@@ -9508,18 +10421,64 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"      downloaded images total: {len(downloaded_images)}")
 
     print("[4/5] Exporting CSV/JSON/Markdown ...")
-    image_rows = rows_from_images(image_results, pages, downloaded_images)
-    evidence_audit_rows = rows_from_evidence_audit(
-        web_results,
-        urls_to_crawl,
-        args.max_pages,
-        collection_plan,
-        manual_include_keywords,
-        manual_exclude_keywords,
-        ml_model,
-        args.ml_auto_include_threshold,
-        args.ml_auto_exclude_threshold,
+    manual_review_rows = rows_from_manual_review_queue(pages, evidence_audit_rows)
+    processed_gui_keys = {
+        (textify(row.get("competitor")), review_target_url(row))
+        for row in gui_review_rows
+    }
+    if args.skip_gui_review:
+        if not gui_review_rows:
+            write_gui_review_results_markdown(out_dir / "gui_review_results.md", gui_review_rows)
+            write_csv(
+                out_dir / "gui_review_results.csv",
+                gui_review_rows,
+                GUI_REVIEW_FIELDS,
+            )
+    else:
+        remaining_manual_review_rows = [
+            row for row in manual_review_rows
+            if (textify(row.get("competitor")), review_target_url(row)) not in processed_gui_keys
+        ]
+        if args.login_assist:
+            remaining_login_rows = [
+                row for row in remaining_manual_review_rows
+                if row_requires_login_action(row)
+            ]
+            remaining_non_login_rows = [
+                row for row in remaining_manual_review_rows
+                if not row_requires_login_action(row)
+            ]
+            if remaining_login_rows:
+                pending_login_rows = login_required_queue_rows(remaining_login_rows, gui_review_rows)
+                if pending_login_rows:
+                    write_login_required_queue(out_dir / "login_required_queue.md", pending_login_rows)
+                    write_csv(out_dir / "login_required_queue.csv", pending_login_rows, LOGIN_REQUIRED_FIELDS)
+            remaining_manual_review_rows = remaining_non_login_rows
+            gui_review_max = args.gui_review_max
+        else:
+            gui_review_max = args.gui_review_max
+        gui_review_rows.extend(
+            execute_gui_review_queue(
+                remaining_manual_review_rows,
+                out_dir,
+                max_items=gui_review_max,
+                enable_browser=not args.disable_browser_gui,
+                proxy_url=args.proxy_url,
+                login_assist=args.login_assist,
+                login_assist_wait_seconds=args.login_assist_wait,
+            )
+        )
+    gui_snapshot_pages = page_extracts_from_gui_review_rows(gui_review_rows, collection_plan)
+    if gui_snapshot_pages:
+        pages = merge_page_extracts(pages, gui_snapshot_pages)
+    manual_review_rows = rows_from_manual_review_queue(pages, evidence_audit_rows)
+    write_csv(
+        out_dir / "gui_review_results.csv",
+        gui_review_rows,
+        GUI_REVIEW_FIELDS,
     )
+    write_gui_review_results_markdown(out_dir / "gui_review_results.md", gui_review_rows)
+    image_rows = rows_from_images(image_results, pages, downloaded_images)
     training_review_rows = build_training_review_sample(
         evidence_audit_rows,
         product_category=collection_plan.category,
@@ -9529,25 +10488,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     page_rows = rows_from_pages(pages, collection_plan, evidence_audit_rows)
     competitor_rows = summarize_competitors(competitors, pages, image_rows, web_results)
-    manual_review_rows = rows_from_manual_review_queue(pages, evidence_audit_rows)
-    if args.skip_gui_review:
-        gui_review_rows: List[Dict[str, Any]] = []
-        write_gui_review_results_markdown(out_dir / "gui_review_results.md", gui_review_rows)
-        write_csv(
-            out_dir / "gui_review_results.csv",
-            gui_review_rows,
-            GUI_REVIEW_FIELDS,
-        )
-    else:
-        gui_review_rows = execute_gui_review_queue(
-            manual_review_rows,
-            out_dir,
-            max_items=args.gui_review_max,
-            enable_browser=not args.disable_browser_gui,
-            proxy_url=args.proxy_url,
-            login_assist=args.login_assist,
-            login_assist_wait_seconds=args.login_assist_wait,
-        )
     login_required_rows = login_required_queue_rows(manual_review_rows, gui_review_rows)
     write_login_required_queue(out_dir / "login_required_queue.md", login_required_rows)
     write_csv(out_dir / "login_required_queue.csv", login_required_rows, LOGIN_REQUIRED_FIELDS)

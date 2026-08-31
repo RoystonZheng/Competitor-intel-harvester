@@ -2,11 +2,23 @@
 
 This folder stores human review labels used to train the local competitor evidence filter.
 
-Default label file:
+Cold-start seed label file:
+
+```text
+training_data/bootstrap_labels.csv
+```
+
+This file is committed to the repository. It lets a fresh local install create the first `models/filter_model.pt` automatically. It is only a weak baseline; later human review should replace it with product-specific evidence.
+
+The seed file currently covers AI/software, physical products, common noise, and an autonomous vehicle/Robotaxi template. The Robotaxi rows are synthetic strategy samples derived from reusable analysis dimensions, not copied internal document text.
+
+Default local label file:
 
 ```text
 training_data/review_labels.csv
 ```
+
+This file is for the user's own labels and is ignored by git.
 
 Required column:
 
@@ -35,7 +47,7 @@ Recommended workflow:
 
 1. Run a collection job.
 2. Review `问题页面核验清单.csv`, `人工抽样标注表.csv`, and `所有采集来源.csv`.
-3. Copy useful rows into `training_data/review_labels.csv`, or copy `training_data/review_labels.example.csv` as the first local label file.
+3. Copy useful rows into `training_data/review_labels.csv`, or use the UI training button to include the current job's review CSV.
 4. Fill `human_label` and `human_reason`.
 5. Keep the product type columns from `training_review_sample.csv` if they exist. They let the tool turn the reviewed rows into reusable search cards for the same kind of product.
 6. Train the model from the UI or run:

@@ -21,6 +21,7 @@ import threading
 import time
 import uuid
 import csv
+import signal
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -28,7 +29,15 @@ from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
-from filter_training import build_training_rows, model_status, save_filter_model, save_model_checkpoint_pt, save_model_weights, train_filter_model
+from filter_training import (
+    bootstrap_filter_model_if_missing,
+    build_training_rows,
+    model_status,
+    save_filter_model,
+    save_model_checkpoint_pt,
+    save_model_weights,
+    train_filter_model,
+)
 from search_cards import build_search_cards, write_search_cards
 
 
@@ -37,6 +46,7 @@ RUNS_DIR = APP_DIR / "runs"
 SCRIPT_PATH = APP_DIR / "competitor_harvester.py"
 VENV_PYTHON = APP_DIR / ".venv" / "bin" / "python"
 DEFAULT_FILTER_MODEL_PATH = APP_DIR / "models" / "filter_model.pt"
+DEFAULT_BOOTSTRAP_LABELS_PATH = APP_DIR / "training_data" / "bootstrap_labels.csv"
 DEFAULT_REVIEW_LABELS_PATH = APP_DIR / "training_data" / "review_labels.csv"
 DEFAULT_SEARCH_CARDS_DIR = APP_DIR / "search_cards"
 INTERNAL_OUTPUT_DIR_NAME = "_internal"
@@ -54,6 +64,8 @@ class Job:
     out_dir: Path
     proxy_url: str = ""
     experiment_minutes: int = 0
+    process_pid: Optional[int] = None
+    terminate_requested: bool = False
     created_at: float = field(default_factory=time.time)
     started_at: Optional[float] = None
     finished_at: Optional[float] = None
@@ -299,6 +311,7 @@ INDEX_HTML = r"""<!doctype html>
       cursor: pointer;
     }
     button.secondary { background: #344054; }
+    button.danger { background: var(--danger); }
     button:disabled { opacity: .55; cursor: not-allowed; }
     .status {
       display: inline-flex;
@@ -312,7 +325,9 @@ INDEX_HTML = r"""<!doctype html>
       color: #344054;
     }
     .status.running { background: #e8f3fb; color: var(--accent); }
+    .status.paused { background: #fff7e6; color: #9a5b00; }
     .status.done { background: #e7f6ef; color: var(--accent-2); }
+    .status.stopping { background: #fff1f3; color: var(--danger); }
     .status.failed { background: #fee4e2; color: var(--danger); }
     .timer {
       display: inline-flex;
@@ -569,7 +584,7 @@ INDEX_HTML = r"""<!doctype html>
           <label class="check"><input name="broad_crawl" type="checkbox" checked> 宽采集</label>
           <label class="check"><input name="codex_review" type="checkbox" checked> Codex AI 收录分析</label>
           <label class="check"><input name="use_ml_filter" type="checkbox" checked> 使用本地训练模型</label>
-          <label class="check"><input name="login_assist" type="checkbox" checked> 登录页自动弹出浏览器</label>
+          <label class="check"><input name="login_assist" type="checkbox" checked> 登录页集中队列与登录态复用</label>
           <label class="check"><input name="skip_gui_review" type="checkbox"> 跳过公开快照复核</label>
           <label class="check"><input name="skip_crawl" type="checkbox"> 跳过网页抓取</label>
           <label class="check"><input name="skip_images" type="checkbox"> 跳过图片下载</label>
@@ -615,6 +630,9 @@ INDEX_HTML = r"""<!doctype html>
         <div class="toolbar">
           <button id="refreshBtn" class="secondary" type="button">刷新</button>
           <button id="checkBtn" class="secondary" type="button">环境检查</button>
+          <button id="pauseBtn" class="secondary" type="button" disabled>暂停</button>
+          <button id="resumeBtn" class="secondary" type="button" disabled>继续</button>
+          <button id="terminateBtn" class="danger" type="button" disabled>终止</button>
           <span id="timerMeta" class="timer">计时未开始</span>
           <span id="jobMeta" class="hint"></span>
         </div>
@@ -639,6 +657,9 @@ INDEX_HTML = r"""<!doctype html>
     const runBtn = document.getElementById('runBtn');
     const refreshBtn = document.getElementById('refreshBtn');
     const checkBtn = document.getElementById('checkBtn');
+    const pauseBtn = document.getElementById('pauseBtn');
+    const resumeBtn = document.getElementById('resumeBtn');
+    const terminateBtn = document.getElementById('terminateBtn');
     const modelStatusBtn = document.getElementById('modelStatusBtn');
     const trainModelBtn = document.getElementById('trainModelBtn');
     const labelsPathEl = document.getElementById('labelsPath');
@@ -659,11 +680,12 @@ INDEX_HTML = r"""<!doctype html>
     const closeReviewModalBtn = document.getElementById('closeReviewModalBtn');
     let currentJobId = null;
     let pollTimer = null;
-    const autoOpenedLoginKeys = new Set();
     const shownProblemReviewKeys = new Set();
 
     function statusClass(status) {
       if (status === 'running' || status === 'queued') return 'status running';
+      if (status === 'paused') return 'status paused';
+      if (status === 'stopping' || status === 'terminated') return 'status stopping';
       if (status === 'done') return 'status done';
       if (status === 'failed') return 'status failed';
       return 'status';
@@ -710,29 +732,22 @@ INDEX_HTML = r"""<!doctype html>
       title.className = 'login-review-title';
       title.textContent = `发现 ${rows.length} 个需登录/注册页面`;
       const body = document.createElement('div');
-      body.textContent = '请使用你有权限的账号在弹出的浏览器中完成登录。登录等待期内页面变为可读时，工具会保存快照和截图；仍不可读的会进入“问题页面核验清单”。';
+      body.textContent = '这些站点已按竞品和域名去重。请用你有权限的账号打开并登录；公开页面会继续采集。网页抓取结束后，工具最多再等待 120 秒复用登录态保存快照，仍不可读的会进入“问题页面核验清单”。';
       const actions = document.createElement('div');
       actions.className = 'login-review-actions';
-      rows.slice(0, 5).forEach((row, index) => {
+      rows.forEach((row, index) => {
         const link = document.createElement('a');
         const url = row.login_assist_url || row.url;
         link.href = url;
         link.target = '_blank';
         link.rel = 'noopener noreferrer';
-        link.textContent = `${index + 1}. ${row.competitor || row.domain || '打开页面'}`;
+        const count = row.queued_url_count ? ` · ${row.queued_url_count} 个URL` : '';
+        link.textContent = `${index + 1}. ${row.competitor || row.domain || '打开并登录'}${count}`;
         actions.appendChild(link);
       });
       loginReviewBannerEl.appendChild(title);
       loginReviewBannerEl.appendChild(body);
       loginReviewBannerEl.appendChild(actions);
-
-      const first = rows[0] || {};
-      const firstUrl = first.login_assist_url || first.url;
-      const key = `${job.id || ''}:${firstUrl || ''}`;
-      if (firstUrl && job.status === 'running' && !autoOpenedLoginKeys.has(key)) {
-        autoOpenedLoginKeys.add(key);
-        try { window.open(firstUrl, '_blank', 'noopener,noreferrer'); } catch (err) {}
-      }
     }
 
     function renderProblemReviews(job) {
@@ -807,11 +822,18 @@ INDEX_HTML = r"""<!doctype html>
         a.innerHTML = `<strong>${file.name}</strong><span>${file.size_label}</span>`;
         artifactsEl.appendChild(a);
       });
-      runBtn.disabled = job.status === 'running' || job.status === 'queued';
-      if (job.status === 'done' || job.status === 'failed') {
+      const active = ['running', 'queued', 'paused', 'stopping'].includes(job.status);
+      runBtn.disabled = active;
+      pauseBtn.disabled = job.status !== 'running';
+      resumeBtn.disabled = job.status !== 'paused';
+      terminateBtn.disabled = !['running', 'queued', 'paused', 'stopping'].includes(job.status);
+      if (job.status === 'done' || job.status === 'failed' || job.status === 'terminated') {
         clearInterval(pollTimer);
         pollTimer = null;
         runBtn.disabled = false;
+        pauseBtn.disabled = true;
+        resumeBtn.disabled = true;
+        terminateBtn.disabled = true;
       }
     }
 
@@ -831,6 +853,26 @@ INDEX_HTML = r"""<!doctype html>
         timerMetaEl.className = 'timer over';
         timerMetaEl.textContent = '计时不可用';
         runBtn.disabled = false;
+        pauseBtn.disabled = true;
+        resumeBtn.disabled = true;
+        terminateBtn.disabled = true;
+        return;
+      }
+      renderJob(data);
+    }
+
+    async function controlJob(action) {
+      if (!currentJobId) return;
+      const res = await fetch(`/api/jobs/${encodeURIComponent(currentJobId)}/${action}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}'
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        logsEl.hidden = false;
+        emptyEl.hidden = true;
+        logsEl.textContent += `\n[ui] 控制失败：${data.error || action}\n`;
         return;
       }
       renderJob(data);
@@ -897,6 +939,9 @@ INDEX_HTML = r"""<!doctype html>
     });
 
     refreshBtn.addEventListener('click', fetchJob);
+    pauseBtn.addEventListener('click', () => controlJob('pause'));
+    resumeBtn.addEventListener('click', () => controlJob('resume'));
+    terminateBtn.addEventListener('click', () => controlJob('terminate'));
 
     checkBtn.addEventListener('click', async () => {
       const formData = new FormData(form);
@@ -933,7 +978,7 @@ INDEX_HTML = r"""<!doctype html>
       trainingLogsEl.textContent = JSON.stringify(data, null, 2);
       modelStatusTextEl.textContent = data.enabled
         ? `模型可用：${data.training_rows || 0} 条标注，${data.model_version || ''}`
-        : `模型未启用：${data.message || 'model file not found'}`;
+        : `模型未启用：${data.message || 'model file not found'}。请先在本轮人工抽样标注表/问题页面核验清单填写 human_label，再训练生成 .pt 模型。`;
     }
 
     modelStatusBtn.addEventListener('click', refreshModelStatus);
@@ -961,7 +1006,7 @@ INDEX_HTML = r"""<!doctype html>
       trainingLogsEl.textContent = JSON.stringify(data, null, 2);
       modelStatusTextEl.textContent = res.ok
         ? `训练完成：${data.training_rows || 0} 条标注，生成搜索卡片 ${data.search_cards ? data.search_cards.written_cards || 0 : 0} 张`
-        : `训练失败：${data.error || 'unknown error'}`;
+        : `训练失败：${data.error || 'unknown error'}。若提示样本不足，请先填写 human_label。`;
       trainModelBtn.disabled = false;
     }
 
@@ -1109,7 +1154,7 @@ def job_timing_snapshot(job: Job, now: Optional[float] = None) -> dict:
     }
 
 
-def load_login_required_reviews(out_dir: Path, limit: int = 20) -> List[dict]:
+def load_login_required_reviews(out_dir: Path, limit: int = 200) -> List[dict]:
     candidate_names = [
         "需登录队列.csv",
         "login_required_queue.csv",
@@ -1137,20 +1182,24 @@ def load_login_required_reviews(out_dir: Path, limit: int = 20) -> List[dict]:
                     requires_login = str(row.get("requires_user_login") or "").strip().lower() == "yes"
                     review_reason = str(row.get("review_reason") or "").strip()
                     status = str(row.get("automated_review_status") or "").strip()
+                    if status.lower() == "login_assisted_snapshot_captured":
+                        continue
                     if not requires_login and review_reason != "login_required_user_action" and "login" not in status.lower():
                         continue
                     url = row.get("login_assist_url") or row.get("url") or row.get("gui_review_url") or ""
-                    key = (row.get("competitor") or "", url)
+                    domain = row.get("domain") or (urlparse(url).netloc or "").lower().removeprefix("www.")
+                    key = (row.get("competitor") or "", domain or url)
                     if not url or key in seen:
                         continue
                     seen.add(key)
                     rows.append(
                         {
                             "competitor": row.get("competitor") or "",
-                            "domain": row.get("domain") or "",
+                            "domain": domain,
                             "title": row.get("title") or "",
                             "url": row.get("url") or url,
                             "login_assist_url": url,
+                            "queued_url_count": row.get("queued_url_count") or "1",
                             "automated_review_status": status or "requires_user_login",
                             "next_step": row.get("next_step") or row.get("suggested_next_step") or "",
                         }
@@ -1436,6 +1485,47 @@ def resolve_app_path(value: str, default_path: Path) -> Path:
     return path.resolve()
 
 
+def model_status_for_ui(
+    model_path: Path,
+    bootstrap_label_paths: Optional[List[Path]] = None,
+    min_labeled_rows: int = 3,
+) -> dict:
+    model_path = Path(model_path).expanduser().resolve()
+    status = model_status(model_path)
+    if status.get("enabled"):
+        status["bootstrap_created"] = False
+        return status
+
+    bootstrap_paths = bootstrap_label_paths
+    should_bootstrap_default = model_path == DEFAULT_FILTER_MODEL_PATH.resolve()
+    if bootstrap_paths is None and should_bootstrap_default:
+        bootstrap_paths = [DEFAULT_BOOTSTRAP_LABELS_PATH, DEFAULT_REVIEW_LABELS_PATH]
+    if not bootstrap_paths:
+        status["bootstrap_created"] = False
+        return status
+
+    try:
+        bootstrap = bootstrap_filter_model_if_missing(
+            model_path,
+            bootstrap_paths,
+            min_labeled_rows=min_labeled_rows,
+        )
+    except Exception as exc:
+        status["bootstrap_created"] = False
+        status["bootstrap_error"] = str(exc)
+        return status
+
+    refreshed = model_status(model_path)
+    refreshed["bootstrap_created"] = bool(bootstrap.get("created"))
+    refreshed["bootstrap_label_paths"] = [str(Path(path).expanduser().resolve()) for path in bootstrap_paths]
+    refreshed["message"] = (
+        "bootstrapped from local seed labels"
+        if bootstrap.get("created")
+        else refreshed.get("message", "")
+    )
+    return refreshed
+
+
 def train_local_filter_model(payload: dict) -> dict:
     labels_path = resolve_app_path(str(payload.get("labels_path") or ""), DEFAULT_REVIEW_LABELS_PATH)
     model_out = resolve_app_path(str(payload.get("model_out") or ""), DEFAULT_FILTER_MODEL_PATH)
@@ -1447,10 +1537,15 @@ def train_local_filter_model(payload: dict) -> dict:
         job_id = str(payload.get("job_id") or "").strip()
         job_dir = safe_job_dir(job_id)
         if job_dir:
-            for candidate in [job_dir / "问题页面核验清单.csv", job_dir / "problem_pages_review.csv"]:
-                if candidate.exists():
-                    label_paths.append(candidate)
-                    break
+            for candidate_names in (
+                ("人工抽样标注表.csv", "training_review_sample.csv"),
+                ("问题页面核验清单.csv", "problem_pages_review.csv"),
+            ):
+                for candidate_name in candidate_names:
+                    candidate = artifact_path(job_dir, candidate_name) or (job_dir / candidate_name)
+                    if candidate.exists() and candidate not in label_paths:
+                        label_paths.append(candidate)
+                        break
     rows = build_training_rows(label_paths)
     model = train_filter_model(rows, min_labeled_rows=min_labeled_rows)
     if model_out.suffix.lower() == ".pt":
@@ -1587,6 +1682,8 @@ def start_job(payload: dict) -> Job:
     ml_model_path = str(payload.get("ml_model_path") or "").strip()
     if ml_model_path:
         cmd += ["--ml-model", ml_model_path]
+    else:
+        model_status_for_ui(DEFAULT_FILTER_MODEL_PATH)
     if not bool_payload(payload, "use_ml_filter", True):
         cmd.append("--disable-ml-filter")
 
@@ -1691,7 +1788,7 @@ def check_environment(searxng_url: str, proxy_url: str = "") -> dict:
         "searxng_search_probe": search_probe,
         "python": python,
         "codex": codex,
-        "local_filter_model": model_status(DEFAULT_FILTER_MODEL_PATH),
+        "local_filter_model": model_status_for_ui(DEFAULT_FILTER_MODEL_PATH),
     }
 
 
@@ -1717,7 +1814,7 @@ def ui_log_line(line: str) -> Optional[str]:
         return None
     if stripped.startswith("$ "):
         return "$ 开始运行采集任务；完整命令和底层日志已写入 run.log。\n\n"
-    if stripped.startswith(("[1/5]", "[2/5]", "[3/5]", "[4/5]", "[4.5/5]", "[5/5]", "[error]")):
+    if stripped.startswith(("[1/5]", "[1.5/5]", "[2/5]", "[2.5/5]", "[3/5]", "[4/5]", "[4.5/5]", "[5/5]", "[error]")):
         return line
     keep_fragments = (
         "web results:",
@@ -1732,6 +1829,7 @@ def ui_log_line(line: str) -> Optional[str]:
         "SearXNG images category",
         "Output:",
         "proxy:",
+        "login queue:",
         "[LOGIN]",
     )
     if any(fragment in stripped for fragment in keep_fragments):
@@ -1770,8 +1868,73 @@ def ui_log_line(line: str) -> Optional[str]:
     return None
 
 
+def signal_process_group(pid: int, sig: int) -> None:
+    if not pid:
+        raise ValueError("任务进程还没有启动。")
+    if os.name == "posix":
+        os.killpg(os.getpgid(pid), sig)
+    else:
+        os.kill(pid, sig)
+
+
+def control_job(job_id: str, action: str) -> dict:
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            raise KeyError("job not found")
+        if job.status in {"done", "failed", "terminated"}:
+            return job_snapshot(job)
+        pid = job.process_pid
+        if not pid:
+            if action == "terminate":
+                job.terminate_requested = True
+                job.status = "terminated"
+                job.finished_at = time.time()
+                job.logs.append("[ui] 任务已在启动前终止。\n")
+                write_timing_artifacts(job)
+                return job_snapshot(job)
+            raise ValueError("任务进程还没有启动。")
+        if action == "pause":
+            if job.status != "running":
+                return job_snapshot(job)
+            if not hasattr(signal, "SIGSTOP"):
+                raise ValueError("当前系统不支持暂停进程。")
+            signal_process_group(pid, signal.SIGSTOP)
+            job.status = "paused"
+            job.logs.append("[ui] 任务已暂停。\n")
+        elif action == "resume":
+            if job.status != "paused":
+                return job_snapshot(job)
+            if not hasattr(signal, "SIGCONT"):
+                raise ValueError("当前系统不支持继续进程。")
+            signal_process_group(pid, signal.SIGCONT)
+            job.status = "running"
+            job.logs.append("[ui] 任务已继续。\n")
+        elif action == "terminate":
+            job.terminate_requested = True
+            job.status = "stopping"
+            job.logs.append("[ui] 正在终止任务。\n")
+            try:
+                signal_process_group(pid, signal.SIGTERM)
+            finally:
+                if os.name == "posix":
+                    try:
+                        signal_process_group(pid, signal.SIGCONT)
+                    except OSError:
+                        pass
+        else:
+            raise ValueError("unsupported job action")
+        return job_snapshot(job)
+
+
 def run_job(job: Job) -> None:
     with JOBS_LOCK:
+        if job.terminate_requested:
+            job.status = "terminated"
+            job.finished_at = time.time()
+            job.returncode = None
+            write_timing_artifacts(job)
+            return
         job.started_at = time.time()
         job.status = "running"
         job.logs.append("$ 开始运行采集任务；完整命令和底层日志已写入 run.log。\n\n")
@@ -1786,7 +1949,10 @@ def run_job(job: Job) -> None:
             text=True,
             bufsize=1,
             env=subprocess_env(job.proxy_url),
+            start_new_session=True,
         )
+        with JOBS_LOCK:
+            job.process_pid = process.pid
         assert process.stdout is not None
         for line in process.stdout:
             display_line = ui_log_line(line)
@@ -1799,7 +1965,10 @@ def run_job(job: Job) -> None:
         with JOBS_LOCK:
             job.returncode = code
             job.finished_at = time.time()
-            job.status = "done" if code == 0 else "failed"
+            if job.terminate_requested or code in {-signal.SIGTERM, -signal.SIGKILL}:
+                job.status = "terminated"
+            else:
+                job.status = "done" if code == 0 else "failed"
             elapsed_label = job_timing_snapshot(job)["elapsed_label"]
             job.logs.append(f"\n[ui] Process exited with code {code}.\n")
             job.logs.append(f"[ui] 全流程耗时：{elapsed_label}.\n")
@@ -1869,7 +2038,7 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/ml/status":
             params = parse_qs(parsed.query)
             model_path = resolve_app_path(params.get("model_path", [""])[0], DEFAULT_FILTER_MODEL_PATH)
-            json_response(self, model_status(model_path))
+            json_response(self, model_status_for_ui(model_path))
             return
         text_response(self, "Not found", "text/plain; charset=utf-8", HTTPStatus.NOT_FOUND)
 
@@ -1877,6 +2046,17 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         length = int(self.headers.get("Content-Length", "0") or 0)
         body = self.rfile.read(length).decode("utf-8")
+        job_action_match = re.fullmatch(r"/api/jobs/([^/]+)/(pause|resume|terminate)", parsed.path)
+        if job_action_match:
+            job_id = unquote(job_action_match.group(1))
+            action = job_action_match.group(2)
+            try:
+                json_response(self, control_job(job_id, action))
+            except KeyError as exc:
+                json_response(self, {"error": str(exc)}, HTTPStatus.NOT_FOUND)
+            except Exception as exc:
+                json_response(self, {"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
         if parsed.path == "/api/ml/train":
             try:
                 payload = json.loads(body or "{}")

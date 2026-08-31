@@ -85,6 +85,14 @@ FACT_TYPE_TERMS = {
     "review_quality_perception": ["review", "quality", "durability"],
     "community_user_feedback": ["review", "problem", "user feedback"],
     "security_compliance": ["security", "privacy", "SOC2", "SSO"],
+    "autonomous_vehicle_competitor_evidence": [
+        "Robotaxi",
+        "service area",
+        "city coverage",
+        "safety report",
+        "sensor suite",
+        "ride experience",
+    ],
 }
 
 REUSABLE_PLATFORM_DOMAINS = {
@@ -147,7 +155,7 @@ def unique_strings(values: Iterable[Any], limit: int = 0) -> List[str]:
 
 def split_terms(value: Any) -> List[str]:
     terms: List[str] = []
-    for chunk in re.split(r"[\n,，;；|、]+", compact_text(value)):
+    for chunk in re.split(r"[\n,，;；|、/]+", compact_text(value)):
         item = re.sub(r"\s+", " ", chunk).strip()
         if item:
             terms.append(item)
@@ -313,6 +321,9 @@ def build_search_cards(
     for row in rows:
         label = normalize_label(row.get("human_label") or row.get("label"))
         if not label:
+            continue
+        card_candidate = compact_text(row.get("search_card_candidate")).lower()
+        if card_candidate in {"no", "false", "0", "否"}:
             continue
         if not has_product_type_metadata(row):
             continue
