@@ -338,7 +338,7 @@ class AdvancedIntelPipelineTest(unittest.TestCase):
         self.assertEqual(gui_rows[0]["automated_review_status"], "requires_user_login")
         self.assertEqual(login_rows[0]["login_assist_url"], "https://demo.example/login")
 
-    def test_login_assist_prefers_original_login_url_over_stale_browser_url(self):
+    def test_login_queue_prefers_original_login_url_over_stale_browser_url(self):
         opened_urls = []
         original_login_snapshot = competitor_harvester.login_assisted_browser_snapshot
 
@@ -370,9 +370,10 @@ class AdvancedIntelPipelineTest(unittest.TestCase):
         finally:
             competitor_harvester.login_assisted_browser_snapshot = original_login_snapshot
 
-        self.assertEqual(opened_urls, ["https://demo.example/login"])
+        self.assertEqual(opened_urls, [])
         self.assertEqual(rows[0]["url"], "https://demo.example/login")
         self.assertEqual(rows[0]["login_assist_url"], "https://demo.example/login")
+        self.assertEqual(rows[0]["automated_review_status"], "requires_user_login")
 
     def test_pre_crawl_login_result_is_not_lost(self):
         audit_row = {
@@ -603,6 +604,84 @@ class AdvancedIntelPipelineTest(unittest.TestCase):
 
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["queued_url_count"], "2")
+
+    def test_login_assist_session_queues_without_opening_browser_pages(self):
+        events = []
+
+        class FakePage:
+            url = "about:blank"
+
+            def is_closed(self):
+                return False
+
+            def goto(self, url, **_kwargs):
+                events.append(("goto", url))
+
+        class FakeContext:
+            pages = [FakePage()]
+
+            def new_page(self):
+                events.append(("new_page", ""))
+                return FakePage()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            session = competitor_harvester.LoginAssistSession(Path(tmp))
+            session.context = FakeContext()
+            added = session.add_rows(
+                [
+                    {
+                        "competitor": "Demo",
+                        "review_reason": "login_required_user_action",
+                        "requires_user_login": "yes",
+                        "url": "https://demo.example/login",
+                        "login_assist_url": "https://demo.example/login",
+                    },
+                    {
+                        "competitor": "Demo",
+                        "review_reason": "login_required_user_action",
+                        "requires_user_login": "yes",
+                        "url": "https://demo.example/account",
+                        "login_assist_url": "https://demo.example/account",
+                    },
+                ]
+            )
+            queue = session.queue_rows()
+
+        self.assertEqual(added, 1)
+        self.assertEqual(queue[0]["queued_url_count"], "2")
+        self.assertEqual(events, [])
+
+    def test_execute_gui_review_queue_does_not_auto_open_login_pages(self):
+        original = competitor_harvester.login_assisted_browser_snapshot
+        calls = []
+
+        def fake_login_snapshot(*args, **kwargs):
+            calls.append((args, kwargs))
+            return "", "", "login_assisted_snapshot_captured", ""
+
+        competitor_harvester.login_assisted_browser_snapshot = fake_login_snapshot
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                rows = competitor_harvester.execute_gui_review_queue(
+                    [
+                        {
+                            "competitor": "Demo",
+                            "priority": "P0-LOGIN",
+                            "review_reason": "login_required_user_action",
+                            "requires_user_login": "yes",
+                            "url": "https://demo.example/login",
+                            "login_assist_url": "https://demo.example/login",
+                        }
+                    ],
+                    Path(tmp),
+                    max_items=1,
+                    login_assist=True,
+                )
+        finally:
+            competitor_harvester.login_assisted_browser_snapshot = original
+
+        self.assertEqual(calls, [])
+        self.assertEqual(rows[0]["automated_review_status"], "requires_user_login")
 
     def test_pages_export_structured_facts_for_prices_specs_and_certifications(self):
         plan = build_product_collection_plan(["Oakley MOD5"], own_product_name="双板全盔")

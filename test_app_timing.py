@@ -97,6 +97,23 @@ class JobTimingTest(unittest.TestCase):
         self.assertEqual(rows[0]["competitor"], "Demo")
         self.assertEqual(rows[0]["login_assist_url"], "https://demo.example/login")
 
+    def test_record_login_open_request_dedupes_by_competitor_and_domain(self):
+        original_runs_dir = app.RUNS_DIR
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app.RUNS_DIR = root / "runs"
+            job_id = "20260831-120000-abcdef"
+            job_dir = app.RUNS_DIR / job_id
+            job_dir.mkdir(parents=True)
+
+            try:
+                first = app.record_login_open_request(job_id, "Demo", "https://demo.example/login")
+                second = app.record_login_open_request(job_id, "Demo", "https://demo.example/account")
+                self.assertEqual(first["marker_path"], second["marker_path"])
+                self.assertTrue(Path(first["marker_path"]).exists())
+            finally:
+                app.RUNS_DIR = original_runs_dir
+
     def test_train_local_filter_model_includes_current_job_training_sample(self):
         original_runs_dir = app.RUNS_DIR
         with tempfile.TemporaryDirectory() as tmp:

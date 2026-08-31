@@ -69,6 +69,21 @@ class SourceStrategyTest(unittest.TestCase):
         self.assertIn("{name} site:github.com", joined)
         self.assertIn("{name} site:zhihu.com 评价", joined)
 
+    def test_autonomous_vehicle_queries_start_with_product_specific_high_intent_terms(self):
+        plan = build_product_collection_plan(
+            ["Apollo Go"],
+            own_product_name="无人车竞品分析",
+            own_product_positioning="比较 Robotaxi 运营、安全、乘坐体验和商业化能力",
+        )
+
+        templates = build_search_query_templates(plan, include_cn=True)
+        first_block = "\n".join(templates[:12]).lower()
+
+        self.assertIn("robotaxi", first_block)
+        self.assertIn("service area", first_block)
+        self.assertIn("safety report", first_block)
+        self.assertNotIn("competitors alternatives", first_block)
+
     def test_evidence_audit_marks_valuable_video_for_gui_review_with_value_rules(self):
         plan = build_product_collection_plan(
             ["Gamma"],

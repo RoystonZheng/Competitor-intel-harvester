@@ -327,7 +327,7 @@ python3 competitor_harvester.py "Gamma" --disable-search-cards
 --require-codex-review     Codex 分析失败时任务失败，不退回规则版报告
 --codex-model MODEL        可选，指定 Codex 模型
 --skip-gui-review          只输出复核队列，不自动做公开快照
---login-assist             登录/注册页进入集中队列，复用同一可见浏览器登录态保存快照
+--login-assist             登录/注册页进入集中队列；用户点击 UI 登录池链接后才打开并复用同一浏览器登录态保存快照
 --login-assist-wait 120    公开网页抓取结束后的登录等待秒数
 --ml-model PATH            本地训练筛选模型路径，默认 models/filter_model.pt
 --disable-ml-filter        不加载本地训练模型

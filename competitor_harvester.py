@@ -17,6 +17,7 @@ import asyncio
 import base64
 import csv
 import dataclasses
+import hashlib
 import json
 import mimetypes
 import os
@@ -25,7 +26,6 @@ import shutil
 import subprocess
 import sys
 import time
-import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -1237,14 +1237,19 @@ def build_search_query_templates(
     manual_search_terms: Iterable[str] = (),
     include_cn: bool = True,
 ) -> List[str]:
+    default_general_queries = DEFAULT_GENERAL_QUERIES
+    if plan.category != "ai_software":
+        default_general_queries = [
+            template for template in DEFAULT_GENERAL_QUERIES if " AI " not in template
+        ]
     return unique_strings(
         [
-            *DEFAULT_GENERAL_QUERIES,
+            *[f"{{name}} {term}" for term in normalize_keyword_inputs(manual_search_terms)],
             *plan.search_templates,
             *plan.directed_source_search_templates,
             *(plan.cn_search_templates if include_cn else []),
             *[f"{{name}} {term}" for term in plan.generated_search_terms[:40]],
-            *[f"{{name}} {term}" for term in normalize_keyword_inputs(manual_search_terms)],
+            *default_general_queries,
         ]
     )
 
@@ -5555,6 +5560,31 @@ def login_queue_key_for(row: Mapping[str, Any]) -> Tuple[str, str]:
     return competitor, domain or canonical_url_for_dedupe(url) or url
 
 
+def review_queue_key_for(row: Mapping[str, Any]) -> Tuple[str, str]:
+    if row_requires_login_action(row):
+        return login_queue_key_for(row)
+    url = review_target_url(row)
+    return textify(row.get("competitor")), canonical_url_for_dedupe(url) or url
+
+
+def login_click_marker_id(competitor: str, url: str) -> str:
+    domain = domain_of(url)
+    stable_target = domain or canonical_url_for_dedupe(url) or url
+    raw = f"{textify(competitor).strip().lower()}::{stable_target.strip().lower()}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def login_click_marker_path(out_dir: Path, competitor: str, url: str) -> Path:
+    return Path(out_dir) / "login_click_requests" / f"{login_click_marker_id(competitor, url)}.json"
+
+
+def login_click_requested(out_dir: Path, row: Mapping[str, Any]) -> bool:
+    url = review_target_url(row)
+    if not url:
+        return False
+    return login_click_marker_path(out_dir, textify(row.get("competitor")), url).exists()
+
+
 def dedupe_login_review_rows(rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
     deduped: List[Dict[str, Any]] = []
     by_key: Dict[Tuple[str, str], Dict[str, Any]] = {}
@@ -5582,8 +5612,8 @@ def dedupe_login_review_rows(rows: Sequence[Mapping[str, Any]]) -> List[Dict[str
 
 def login_review_next_step() -> str:
     return (
-        "系统会把同站点登录页合并到集中等待区；请使用你有权限的账号完成登录/注册并确认页面是否有产品事实。"
-        "公开页面采集结束后的登录等待期内，如果页面变成可读内容，工具会保存文本快照和截图；如果仍不可读，结束时保留在问题页面核验清单。"
+        "系统会把同站点登录页合并到集中等待区，不会主动打开网页。"
+        "需要处理时，请在 UI 登录池点击对应链接；工具收到点击信号后才打开该站点，并在公开页面采集结束后的等待期内尝试保存登录后快照。"
     )
 
 
@@ -5744,7 +5774,7 @@ def write_manual_review_queue(path: Path, rows: Sequence[Dict[str, Any]]) -> Non
         "",
         "处理原则：先在 GUI/浏览器中打开原网页，判断是否确实是公开且有产品情报价值的内容；确认有价值后，再通过合规方式补证，例如同站公开导航、sitemap、官方文档/API、帮助中心、公开静态页、可下载公开资料或人工摘录公开可见内容。",
         "",
-        "遇到登录/注册页时，工具会先按竞品和域名去重放入登录等待区，公开页面继续采集；网页抓取结束后统一等待用户登录并复用同一浏览器登录态保存快照，否则合并到问题页面核验清单。",
+        "遇到登录/注册页时，工具会先按竞品和域名去重放入登录等待区，公开页面继续采集；只有用户在 UI 登录池点击对应链接后，工具才会打开该站点并复用同一浏览器登录态保存快照，否则合并到问题页面核验清单。",
         "",
         "边界：不破解验证码，不绕过登录/付费/访问控制，不保存账号凭据，不调用未授权私有接口，不采集私密或违法内容。",
         "",
@@ -6073,16 +6103,12 @@ def login_assisted_browser_snapshot(
     try:
         from playwright.sync_api import sync_playwright
     except Exception as exc:
-        try:
-            opened = webbrowser.open(url)
-        except Exception:
-            opened = False
         note_path = out_dir / "gui_review_snapshots" / f"{slug}-login-required.txt"
         note_path.write_text(
             "\n".join(
                 [
                     "Playwright 不可用，无法在工具内等待登录后自动截取页面。",
-                    f"系统浏览器打开状态：{'已尝试打开' if opened else '未能打开'}",
+                    "工具不会自动改用系统浏览器打开登录页；请回到 UI 登录池点击链接后再处理。",
                     f"URL: {url}",
                     "请用有权限的账号登录/注册后，重新运行该竞品或人工补充截图/摘录。",
                     f"错误: {exc}",
@@ -6151,16 +6177,12 @@ def login_assisted_browser_snapshot(
             "page still looks like login/register/access-controlled content after waiting",
         )
     except Exception as exc:
-        try:
-            opened = webbrowser.open(url)
-        except Exception:
-            opened = False
         note_path = out_dir / "gui_review_snapshots" / f"{slug}-login-required.txt"
         note_path.write_text(
             "\n".join(
                 [
                     "可见浏览器登录辅助失败。",
-                    f"系统浏览器打开状态：{'已尝试打开' if opened else '未能打开'}",
+                    "工具不会自动改用系统浏览器打开登录页；请回到 UI 登录池点击链接后再处理。",
                     f"URL: {url}",
                     "请用有权限的账号登录/注册后，重新运行该竞品或人工补充截图/摘录。",
                     f"错误: {exc}",
@@ -6236,10 +6258,12 @@ class LoginAssistSession:
             item["queued_url_count"] = str(len(self.queued_urls_by_key[key]))
             item["queued_urls"] = "\n".join(self.queued_urls_by_key[key])
             added += 1
-            if self.start():
-                self._open_or_reuse_page(key, review_target_url(item))
         if added:
-            print(f"[LOGIN] Added {added} unique login-required site(s) to the login queue.", flush=True)
+            print(
+                f"[LOGIN] Added {added} unique login-required site(s) to the login queue; "
+                "browser pages open only after the UI login link is clicked.",
+                flush=True,
+            )
         return added
 
     def _open_or_reuse_page(self, key: Tuple[str, str], url: str) -> Any:
@@ -6317,7 +6341,7 @@ class LoginAssistSession:
                 text_path=textify(result.get("text_snapshot_path")) if result else "",
                 screenshot_path=textify(result.get("screenshot_path")) if result else "",
                 excerpt=textify(result.get("text_snapshot_excerpt")) if result else "",
-                next_step=textify(result.get("next_step")) if result else "已加入登录等待区；公开页面继续采集，登录等待截止到网页抓取结束后 120 秒。",
+                next_step=textify(result.get("next_step")) if result else "已加入登录等待区；工具不会主动弹出网页，点击 UI 登录链接后才会打开该站点。",
             )
             pending["queued_url_count"] = str(len(self.queued_urls_by_key.get(key, [])) or 1)
             pending["queued_urls"] = "\n".join(self.queued_urls_by_key.get(key, [])) or pending["url"]
@@ -6327,26 +6351,28 @@ class LoginAssistSession:
     def capture_all(self, wait_seconds: int = 120) -> List[Dict[str, Any]]:
         if not self.rows_by_key:
             return []
-        if not self.context and not self.start():
-            rows = []
-            for key, row in self.rows_by_key.items():
-                result = self._result_from_row(
-                    row,
-                    "requires_user_login",
-                    next_step=f"登录辅助浏览器不可用，已保留在需登录队列：{self.start_error}",
-                )
-                self.results_by_key[key] = result
-                rows.append(result)
-            return rows
 
         wait_seconds = max(0, int(wait_seconds or 0))
-        print(f"[LOGIN] Waiting up to {wait_seconds}s after public crawling for queued login pages.", flush=True)
+        print(
+            f"[LOGIN] Waiting up to {wait_seconds}s after public crawling for UI-clicked login pages.",
+            flush=True,
+        )
         pending = set(self.rows_by_key)
         stable_checks: Dict[Tuple[str, str], int] = {key: 0 for key in pending}
         deadline = time.time() + wait_seconds
         while pending and time.time() < deadline:
             for key in list(pending):
                 row = self.rows_by_key[key]
+                if not login_click_requested(self.out_dir, row):
+                    continue
+                if not self.context and not self.start():
+                    self.results_by_key[key] = self._result_from_row(
+                        row,
+                        "requires_user_login",
+                        next_step=f"用户已点击登录池链接，但登录辅助浏览器不可用，已保留在需登录队列：{self.start_error}",
+                    )
+                    pending.remove(key)
+                    continue
                 page = self._open_or_reuse_page(key, review_target_url(row))
                 readable, title, cleaned = self._readable_snapshot(page, row)
                 if readable:
@@ -6399,6 +6425,14 @@ class LoginAssistSession:
         slug = f"{index:03d}-{slugify(textify(row.get('competitor')) or domain_of(url) or 'login')}"
         screenshot_path = self.snapshot_dir / f"{slug}-login-assisted.png"
         text_path = self.snapshot_dir / f"{slug}-login-assisted.txt"
+        if not login_click_requested(self.out_dir, row):
+            return (
+                "awaiting_user_login",
+                "",
+                "",
+                "",
+                "用户尚未点击 UI 登录池链接；工具未主动打开该网页，已保留在需登录队列。",
+            )
         readable, title, cleaned = self._readable_snapshot(page, row)
         screenshot_file = ""
         if page is not None:
@@ -6493,35 +6527,12 @@ def execute_gui_review_queue(
             rows.append(result)
             continue
         if requires_login:
-            if login_assist:
-                screenshot_path, text_path, login_status, login_error = login_assisted_browser_snapshot(
-                    url,
-                    out_dir,
-                    slug,
-                    wait_seconds=login_assist_wait_seconds,
-                    timeout=timeout,
-                    proxy_url=proxy_url,
-                )
-                result.update(
-                    {
-                        "automated_review_status": login_status,
-                        "text_snapshot_path": text_path,
-                        "screenshot_path": screenshot_path,
-                        "text_snapshot_excerpt": read_snapshot_excerpt(text_path),
-                        "next_step": (
-                            "登录后页面已保存文本快照和截图；仍建议人工核验是否可作为报告事实证据。"
-                            if login_status == "login_assisted_snapshot_captured"
-                            else f"需要用户登录/注册后继续复核；本轮保留在问题页面核验清单。{login_error}"
-                        ),
-                    }
-                )
-            else:
-                result.update(
-                    {
-                        "automated_review_status": "requires_user_login",
-                        "next_step": login_review_next_step(),
-                    }
-                )
+            result.update(
+                {
+                    "automated_review_status": "requires_user_login",
+                    "next_step": login_review_next_step(),
+                }
+            )
             rows.append(result)
             continue
         adapter_info = classify_source_url(url)
@@ -6712,7 +6723,7 @@ def write_login_required_queue(path: Path, rows: Sequence[Mapping[str, Any]]) ->
     lines = [
         "# 需登录队列",
         "",
-        "这些页面疑似需要登录、注册、验证码或账号权限。工具会按竞品和域名去重，统一放入登录等待区；公开页面会继续采集。登录后可读的内容会保存快照，仍不可读的会留在本队列。",
+        "这些页面疑似需要登录、注册、验证码或账号权限。工具会按竞品和域名去重，统一放入登录等待区；公开页面会继续采集。只有用户在 UI 登录池点击对应链接后，工具才会打开该站点并尝试保存登录后快照，仍不可读的会留在本队列。",
         "",
         "边界：只处理用户本人有权限访问的信息，不破解验证码，不绕过登录/付费/访问控制，不保存账号凭据。",
         "",
@@ -10422,10 +10433,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     print("[4/5] Exporting CSV/JSON/Markdown ...")
     manual_review_rows = rows_from_manual_review_queue(pages, evidence_audit_rows)
-    processed_gui_keys = {
-        (textify(row.get("competitor")), review_target_url(row))
-        for row in gui_review_rows
-    }
+    processed_gui_keys = {review_queue_key_for(row) for row in gui_review_rows}
     if args.skip_gui_review:
         if not gui_review_rows:
             write_gui_review_results_markdown(out_dir / "gui_review_results.md", gui_review_rows)
@@ -10437,7 +10445,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     else:
         remaining_manual_review_rows = [
             row for row in manual_review_rows
-            if (textify(row.get("competitor")), review_target_url(row)) not in processed_gui_keys
+            if review_queue_key_for(row) not in processed_gui_keys
         ]
         if args.login_assist:
             remaining_login_rows = [

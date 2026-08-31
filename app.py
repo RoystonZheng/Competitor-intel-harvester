@@ -21,6 +21,8 @@ import threading
 import time
 import uuid
 import csv
+import hashlib
+import html
 import signal
 from dataclasses import dataclass, field
 from http import HTTPStatus
@@ -732,13 +734,18 @@ INDEX_HTML = r"""<!doctype html>
       title.className = 'login-review-title';
       title.textContent = `发现 ${rows.length} 个需登录/注册页面`;
       const body = document.createElement('div');
-      body.textContent = '这些站点已按竞品和域名去重。请用你有权限的账号打开并登录；公开页面会继续采集。网页抓取结束后，工具最多再等待 120 秒复用登录态保存快照，仍不可读的会进入“问题页面核验清单”。';
+      body.textContent = '这些站点已按竞品和域名去重。工具不会主动打开登录网页；只有点击下面的登录链接，采集进程才会访问该站点。公开页面会继续采集，等待期结束仍未登录的会进入“问题页面核验清单”。';
       const actions = document.createElement('div');
       actions.className = 'login-review-actions';
       rows.forEach((row, index) => {
         const link = document.createElement('a');
         const url = row.login_assist_url || row.url;
-        link.href = url;
+        const params = new URLSearchParams({
+          job: job.id || '',
+          competitor: row.competitor || '',
+          url,
+        });
+        link.href = `/api/login/open?${params.toString()}`;
         link.target = '_blank';
         link.rel = 'noopener noreferrer';
         const count = row.queued_url_count ? ` · ${row.queued_url_count} 个URL` : '';
@@ -1363,6 +1370,37 @@ def safe_job_dir(job_id: str) -> Optional[Path]:
     except ValueError:
         return None
     return out_dir if out_dir.is_dir() else None
+
+
+def login_click_marker_id(competitor: str, url: str) -> str:
+    parsed = urlparse(url)
+    domain = (parsed.netloc or "").lower().removeprefix("www.")
+    stable_target = domain or url
+    raw = f"{(competitor or '').strip().lower()}::{stable_target.strip().lower()}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def record_login_open_request(job_id: str, competitor: str, url: str) -> dict:
+    out_dir = safe_job_dir(job_id)
+    if not out_dir:
+        raise ValueError("job not found")
+    url = (url or "").strip()
+    if not url or urlparse(url).scheme not in {"http", "https"}:
+        raise ValueError("invalid login url")
+    clicked_at = time.time()
+    marker_dir = out_dir / "login_click_requests"
+    marker_dir.mkdir(parents=True, exist_ok=True)
+    marker_path = marker_dir / f"{login_click_marker_id(competitor, url)}.json"
+    payload = {
+        "job_id": job_id,
+        "competitor": competitor,
+        "url": url,
+        "domain": (urlparse(url).netloc or "").lower().removeprefix("www."),
+        "clicked_at": clicked_at,
+        "clicked_at_label": format_local_time(clicked_at),
+    }
+    marker_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {**payload, "marker_path": str(marker_path)}
 
 
 def disk_job_snapshot(job_id: str) -> Optional[dict]:
@@ -2028,6 +2066,30 @@ class Handler(BaseHTTPRequestHandler):
             job_id = params.get("job", [""])[0]
             filename = params.get("file", [""])[0]
             self.serve_download(job_id, filename)
+            return
+        if parsed.path == "/api/login/open":
+            params = parse_qs(parsed.query)
+            job_id = params.get("job", [""])[0]
+            competitor = params.get("competitor", [""])[0]
+            url = params.get("url", [""])[0]
+            try:
+                payload = record_login_open_request(job_id, competitor, url)
+            except Exception as exc:
+                text_response(self, f"登录请求失败：{exc}", "text/plain; charset=utf-8", HTTPStatus.BAD_REQUEST)
+                return
+            escaped_url = html.escape(payload["url"], quote=True)
+            html_body = (
+                "<!doctype html><meta charset='utf-8'>"
+                "<title>登录请求已发送</title>"
+                "<body style='font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;line-height:1.6;padding:24px;'>"
+                "<h2>登录请求已发送</h2>"
+                "<p>已记录你的点击。采集进程只会对这个站点放行，并在等待期内打开工具浏览器。</p>"
+                "<p>请在弹出的工具浏览器中使用你有权限的账号登录。未点击的登录站点不会被主动打开。</p>"
+                "<p>如果任务已经结束，可以回到主页面重新运行，或手动补充公开截图和摘录。</p>"
+                f"<p><a href='{escaped_url}' target='_blank' rel='noopener noreferrer'>手动打开原网页</a></p>"
+                "</body>"
+            )
+            text_response(self, html_body)
             return
         if parsed.path == "/api/check":
             params = parse_qs(parsed.query)
