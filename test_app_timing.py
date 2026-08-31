@@ -114,6 +114,59 @@ class JobTimingTest(unittest.TestCase):
             finally:
                 app.RUNS_DIR = original_runs_dir
 
+    def test_login_skip_request_hides_row_from_login_pool(self):
+        original_runs_dir = app.RUNS_DIR
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app.RUNS_DIR = root / "runs"
+            job_id = "20260831-120000-abcdef"
+            job_dir = app.RUNS_DIR / job_id
+            job_dir.mkdir(parents=True)
+            queue = job_dir / "需登录队列.csv"
+            queue.write_text(
+                "competitor,domain,title,url,login_assist_url,requires_user_login,automated_review_status,next_step\n"
+                "Demo,demo.example,Login,https://demo.example/login,https://demo.example/login,yes,awaiting_user_login,请登录后继续\n",
+                encoding="utf-8-sig",
+            )
+
+            try:
+                before = app.load_login_required_reviews(job_dir)
+                app.record_login_skip_request(job_id, "Demo", "https://demo.example/login")
+                after = app.load_login_required_reviews(job_dir)
+            finally:
+                app.RUNS_DIR = original_runs_dir
+
+        self.assertEqual(len(before), 1)
+        self.assertEqual(after, [])
+
+    def test_login_pool_hides_weak_multi_word_competitor_binding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = Path(tmp) / "需登录队列.csv"
+            queue.write_text(
+                "competitor,domain,title,url,login_assist_url,requires_user_login,automated_review_status,next_step\n"
+                "Apollo Go,apollo.io,Apollo.io login,https://apollo.io/login,https://apollo.io/login,yes,awaiting_user_login,请登录后继续\n"
+                "Apollo Go,bitauto.com,Apollo Go by Baidu begins testing services,https://www.bitauto.com/news/1,https://www.bitauto.com/news/1,yes,awaiting_user_login,请登录后继续\n",
+                encoding="utf-8-sig",
+            )
+
+            rows = app.load_login_required_reviews(Path(tmp))
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["domain"], "bitauto.com")
+
+    def test_login_pool_hides_recruiting_account_pages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = Path(tmp) / "需登录队列.csv"
+            queue.write_text(
+                "competitor,domain,title,url,login_assist_url,requires_user_login,automated_review_status,next_step\n"
+                "WeRide,app.mokahr.com,文远知行WeRide - 校园招聘,https://app.mokahr.com/campus-recruitment/weride,https://app.mokahr.com/campus-recruitment/weride,yes,awaiting_user_login,请登录后继续\n",
+                encoding="utf-8-sig",
+            )
+
+            rows = app.load_login_required_reviews(Path(tmp))
+
+        self.assertEqual(rows, [])
+
     def test_train_local_filter_model_includes_current_job_training_sample(self):
         original_runs_dir = app.RUNS_DIR
         with tempfile.TemporaryDirectory() as tmp:

@@ -392,6 +392,33 @@ class AdvancedIntelPipelineTest(unittest.TestCase):
         self.assertEqual(manual_rows[0]["review_reason"], "login_required_user_action")
         self.assertEqual(manual_rows[0]["requires_user_login"], "yes")
 
+    def test_pre_crawl_login_queue_rejects_weak_competitor_binding(self):
+        unrelated_login = {
+            "competitor": "Apollo Go",
+            "url": "https://apollo.io/login",
+            "title": "Apollo.io login",
+            "domain": "apollo.io",
+            "hard_gate": "rejected_auth_or_transaction_shell",
+            "page_role": "auth_or_account_shell",
+            "source_kind": "official_candidate",
+            "reason": "brand_match: apollo",
+            "value_signals": "",
+            "matched_fields": "",
+            "pm_value_score": "0",
+            "category_fit_score": "0",
+        }
+        related_login = {
+            **unrelated_login,
+            "url": "https://apollo-go.example.com/login",
+            "title": "Apollo Go robotaxi account login",
+            "domain": "apollo-go.example.com",
+        }
+
+        manual_rows = rows_from_manual_review_queue([], [unrelated_login, related_login])
+
+        self.assertEqual(len(manual_rows), 1)
+        self.assertEqual(manual_rows[0]["login_assist_url"], "https://apollo-go.example.com/login")
+
     def test_login_assisted_snapshot_becomes_page_extract_for_analysis(self):
         with tempfile.TemporaryDirectory() as tmp:
             snapshot_path = Path(tmp) / "login-assisted.txt"
@@ -650,6 +677,39 @@ class AdvancedIntelPipelineTest(unittest.TestCase):
         self.assertEqual(added, 1)
         self.assertEqual(queue[0]["queued_url_count"], "2")
         self.assertEqual(events, [])
+
+    def test_login_assist_session_honors_skip_marker_without_opening_browser_pages(self):
+        events = []
+
+        class FakeContext:
+            pages = []
+
+            def new_page(self):
+                events.append(("new_page", ""))
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            session = competitor_harvester.LoginAssistSession(out_dir)
+            session.context = FakeContext()
+            session.add_rows(
+                [
+                    {
+                        "competitor": "Demo",
+                        "review_reason": "login_required_user_action",
+                        "requires_user_login": "yes",
+                        "url": "https://demo.example/login",
+                        "login_assist_url": "https://demo.example/login",
+                    }
+                ]
+            )
+            skip_path = competitor_harvester.login_skip_marker_path(out_dir, "Demo", "https://demo.example/login")
+            skip_path.parent.mkdir(parents=True)
+            skip_path.write_text("{}", encoding="utf-8")
+            rows = session.capture_all(wait_seconds=0)
+
+        self.assertEqual(events, [])
+        self.assertEqual(rows[0]["automated_review_status"], "login_skipped_by_user")
 
     def test_execute_gui_review_queue_does_not_auto_open_login_pages(self):
         original = competitor_harvester.login_assisted_browser_snapshot

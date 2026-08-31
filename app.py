@@ -391,7 +391,37 @@ INDEX_HTML = r"""<!doctype html>
       flex-wrap: wrap;
       gap: 8px;
     }
-    .login-review-actions a {
+    .login-review-item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      padding: 9px;
+      border: 1px solid #fdb022;
+      border-radius: 6px;
+      background: #fff;
+    }
+    .login-review-meta {
+      display: grid;
+      gap: 3px;
+      min-width: 0;
+    }
+    .login-review-meta strong,
+    .login-review-meta span {
+      overflow-wrap: anywhere;
+    }
+    .login-review-meta span {
+      color: #9a5b00;
+      font-size: 12px;
+    }
+    .login-review-buttons {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .login-review-actions a,
+    .login-review-actions button {
       display: inline-flex;
       align-items: center;
       min-height: 34px;
@@ -402,6 +432,14 @@ INDEX_HTML = r"""<!doctype html>
       color: #7a2e0e;
       text-decoration: none;
       font-weight: 700;
+    }
+    .login-review-actions button {
+      color: #7a2e0e;
+      cursor: pointer;
+    }
+    .login-review-actions button.skip {
+      border-color: #fedf89;
+      color: #93370d;
     }
     pre {
       min-height: 440px;
@@ -722,6 +760,31 @@ INDEX_HTML = r"""<!doctype html>
       while (node.firstChild) node.removeChild(node.firstChild);
     }
 
+    async function sendLoginRequest(job, row, action, button, statusNode) {
+      if (!job.id) return;
+      const url = row.login_assist_url || row.url || '';
+      const endpoint = action === 'skip' ? '/api/login/skip' : '/api/login/open';
+      button.disabled = true;
+      statusNode.textContent = action === 'skip' ? '正在跳过' : '正在发送登录请求';
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          job: job.id,
+          competitor: row.competitor || '',
+          url
+        })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        button.disabled = false;
+        statusNode.textContent = `操作失败：${data.error || data.message || action}`;
+        return;
+      }
+      statusNode.textContent = action === 'skip' ? '已跳过' : '已请求登录，等待工具浏览器接管';
+      fetchJob();
+    }
+
     function renderLoginReviews(job) {
       const rows = job.login_required_reviews || [];
       clearChildren(loginReviewBannerEl);
@@ -734,26 +797,70 @@ INDEX_HTML = r"""<!doctype html>
       title.className = 'login-review-title';
       title.textContent = `发现 ${rows.length} 个需登录/注册页面`;
       const body = document.createElement('div');
-      body.textContent = '这些站点已按竞品和域名去重。工具不会主动打开登录网页；只有点击下面的登录链接，采集进程才会访问该站点。公开页面会继续采集，等待期结束仍未登录的会进入“问题页面核验清单”。';
+      body.textContent = '这些站点已按竞品和域名去重。工具不会主动打开登录网页；只有点击下面的登录按钮，采集进程才会访问该站点。公开页面会继续采集，等待期结束仍未登录的会进入“问题页面核验清单”。';
+      const batchActions = document.createElement('div');
+      batchActions.className = 'login-review-actions';
+      const skipAllBtn = document.createElement('button');
+      skipAllBtn.type = 'button';
+      skipAllBtn.className = 'skip';
+      skipAllBtn.textContent = '全部跳过登录页';
+      skipAllBtn.addEventListener('click', async () => {
+        skipAllBtn.disabled = true;
+        skipAllBtn.textContent = '正在跳过';
+        await Promise.all(rows.map(row => fetch('/api/login/skip', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            job: job.id || '',
+            competitor: row.competitor || '',
+            url: row.login_assist_url || row.url || ''
+          })
+        }).catch(() => null)));
+        skipAllBtn.textContent = '已跳过';
+        fetchJob();
+      });
+      batchActions.appendChild(skipAllBtn);
       const actions = document.createElement('div');
       actions.className = 'login-review-actions';
       rows.forEach((row, index) => {
-        const link = document.createElement('a');
+        const item = document.createElement('div');
+        item.className = 'login-review-item';
         const url = row.login_assist_url || row.url;
-        const params = new URLSearchParams({
-          job: job.id || '',
-          competitor: row.competitor || '',
-          url,
-        });
-        link.href = `/api/login/open?${params.toString()}`;
-        link.target = '_blank';
-        link.rel = 'noopener noreferrer';
         const count = row.queued_url_count ? ` · ${row.queued_url_count} 个URL` : '';
-        link.textContent = `${index + 1}. ${row.competitor || row.domain || '打开并登录'}${count}`;
-        actions.appendChild(link);
+        const meta = document.createElement('div');
+        meta.className = 'login-review-meta';
+        const label = document.createElement('strong');
+        label.textContent = `${index + 1}. ${row.competitor || '未知竞品'} · ${row.domain || '未知域名'}${count}`;
+        const detail = document.createElement('span');
+        detail.textContent = row.title || url || '无标题';
+        const state = document.createElement('span');
+        state.textContent = row.login_click_requested === 'yes' ? '已请求登录，等待工具浏览器读取登录态' : '等待操作';
+        meta.appendChild(label);
+        meta.appendChild(detail);
+        meta.appendChild(state);
+
+        const buttons = document.createElement('div');
+        buttons.className = 'login-review-buttons';
+        const openBtn = document.createElement('button');
+        openBtn.type = 'button';
+        openBtn.textContent = row.login_click_requested === 'yes' ? '已请求登录' : '登录并继续';
+        openBtn.disabled = row.login_click_requested === 'yes';
+        openBtn.addEventListener('click', () => sendLoginRequest(job, row, 'open', openBtn, state));
+        const skipBtn = document.createElement('button');
+        skipBtn.type = 'button';
+        skipBtn.className = 'skip';
+        skipBtn.textContent = '跳过';
+        skipBtn.addEventListener('click', () => sendLoginRequest(job, row, 'skip', skipBtn, state));
+        buttons.appendChild(openBtn);
+        buttons.appendChild(skipBtn);
+
+        item.appendChild(meta);
+        item.appendChild(buttons);
+        actions.appendChild(item);
       });
       loginReviewBannerEl.appendChild(title);
       loginReviewBannerEl.appendChild(body);
+      loginReviewBannerEl.appendChild(batchActions);
       loginReviewBannerEl.appendChild(actions);
     }
 
@@ -1137,6 +1244,83 @@ def format_local_time(timestamp: Optional[float]) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
 
 
+LOGIN_GENERIC_COMPETITOR_TERMS = {
+    "ai",
+    "app",
+    "apps",
+    "map",
+    "maps",
+    "tool",
+    "tools",
+    "system",
+    "platform",
+    "software",
+    "service",
+    "services",
+    "product",
+    "api",
+    "sdk",
+    "地图",
+    "导航",
+    "系统",
+    "平台",
+    "软件",
+    "服务",
+    "产品",
+}
+
+LOGIN_POOL_EXCLUDE_HINTS = {
+    "career",
+    "careers",
+    "job",
+    "jobs",
+    "hiring",
+    "recruit",
+    "recruitment",
+    "campus",
+    "talent",
+    "mokahr",
+    "greenhouse",
+    "lever.co",
+    "workday",
+    "职位",
+    "招聘",
+    "校园招聘",
+    "社招",
+    "人才",
+    "投递",
+    "简历",
+}
+
+
+def login_row_has_strong_binding(competitor: str, url: str, title: str = "") -> bool:
+    competitor = (competitor or "").strip().lower()
+    if not competitor:
+        return True
+    haystack = f"{url} {title}".lower()
+    if any(hint in haystack for hint in LOGIN_POOL_EXCLUDE_HINTS):
+        return False
+    compact_haystack = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", haystack)
+    compact_competitor = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", competitor)
+    if compact_competitor and compact_competitor in compact_haystack:
+        return True
+    if ".ai" in competitor:
+        return False
+    raw_tokens = re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]+", competitor)
+    semantic_tokens = [
+        token
+        for token in raw_tokens
+        if len(token) > 1 and token not in LOGIN_GENERIC_COMPETITOR_TERMS
+    ]
+    if len(semantic_tokens) > 1:
+        if any(len(token) <= 2 for token in semantic_tokens):
+            return False
+        return all(token in haystack or token in compact_haystack for token in semantic_tokens)
+    if not semantic_tokens:
+        return True
+    return semantic_tokens[0] in haystack or semantic_tokens[0] in compact_haystack
+
+
 def job_timing_snapshot(job: Job, now: Optional[float] = None) -> dict:
     end_time = job.finished_at if job.finished_at is not None else (now if now is not None else time.time())
     start_time = job.started_at or job.created_at
@@ -1191,12 +1375,18 @@ def load_login_required_reviews(out_dir: Path, limit: int = 200) -> List[dict]:
                     status = str(row.get("automated_review_status") or "").strip()
                     if status.lower() == "login_assisted_snapshot_captured":
                         continue
+                    if status.lower() == "login_skipped_by_user":
+                        continue
                     if not requires_login and review_reason != "login_required_user_action" and "login" not in status.lower():
                         continue
                     url = row.get("login_assist_url") or row.get("url") or row.get("gui_review_url") or ""
                     domain = row.get("domain") or (urlparse(url).netloc or "").lower().removeprefix("www.")
                     key = (row.get("competitor") or "", domain or url)
                     if not url or key in seen:
+                        continue
+                    if login_request_marker_exists(out_dir, key[0], url, "skip"):
+                        continue
+                    if not login_row_has_strong_binding(key[0], url, row.get("title") or ""):
                         continue
                     seen.add(key)
                     rows.append(
@@ -1208,6 +1398,8 @@ def load_login_required_reviews(out_dir: Path, limit: int = 200) -> List[dict]:
                             "login_assist_url": url,
                             "queued_url_count": row.get("queued_url_count") or "1",
                             "automated_review_status": status or "requires_user_login",
+                            "login_click_requested": "yes" if login_request_marker_exists(out_dir, key[0], url, "click") else "no",
+                            "login_skip_requested": "no",
                             "next_step": row.get("next_step") or row.get("suggested_next_step") or "",
                         }
                     )
@@ -1380,27 +1572,46 @@ def login_click_marker_id(competitor: str, url: str) -> str:
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
 
-def record_login_open_request(job_id: str, competitor: str, url: str) -> dict:
+def login_request_marker_path(out_dir: Path, competitor: str, url: str, kind: str) -> Path:
+    marker_dir = out_dir / f"login_{kind}_requests"
+    return marker_dir / f"{login_click_marker_id(competitor, url)}.json"
+
+
+def login_request_marker_exists(out_dir: Path, competitor: str, url: str, kind: str) -> bool:
+    return login_request_marker_path(out_dir, competitor, url, kind).exists()
+
+
+def record_login_request(job_id: str, competitor: str, url: str, kind: str) -> dict:
     out_dir = safe_job_dir(job_id)
     if not out_dir:
         raise ValueError("job not found")
     url = (url or "").strip()
     if not url or urlparse(url).scheme not in {"http", "https"}:
         raise ValueError("invalid login url")
+    if kind not in {"click", "skip"}:
+        raise ValueError("invalid login action")
     clicked_at = time.time()
-    marker_dir = out_dir / "login_click_requests"
-    marker_dir.mkdir(parents=True, exist_ok=True)
-    marker_path = marker_dir / f"{login_click_marker_id(competitor, url)}.json"
+    marker_path = login_request_marker_path(out_dir, competitor, url, kind)
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "job_id": job_id,
         "competitor": competitor,
         "url": url,
         "domain": (urlparse(url).netloc or "").lower().removeprefix("www."),
-        "clicked_at": clicked_at,
-        "clicked_at_label": format_local_time(clicked_at),
+        "action": kind,
+        "requested_at": clicked_at,
+        "requested_at_label": format_local_time(clicked_at),
     }
     marker_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return {**payload, "marker_path": str(marker_path)}
+
+
+def record_login_open_request(job_id: str, competitor: str, url: str) -> dict:
+    return record_login_request(job_id, competitor, url, "click")
+
+
+def record_login_skip_request(job_id: str, competitor: str, url: str) -> dict:
+    return record_login_request(job_id, competitor, url, "skip")
 
 
 def disk_job_snapshot(job_id: str) -> Optional[dict]:
@@ -2123,6 +2334,24 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 payload = json.loads(body or "{}")
                 json_response(self, train_local_filter_model(payload), HTTPStatus.CREATED)
+            except Exception as exc:
+                json_response(self, {"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if parsed.path in {"/api/login/open", "/api/login/skip"}:
+            try:
+                payload = json.loads(body or "{}")
+                job_id = payload.get("job") or payload.get("job_id") or ""
+                competitor = payload.get("competitor") or ""
+                url = payload.get("url") or ""
+                if parsed.path.endswith("/skip"):
+                    result = record_login_skip_request(job_id, competitor, url)
+                    result["ok"] = True
+                    result["message"] = "login skipped"
+                else:
+                    result = record_login_open_request(job_id, competitor, url)
+                    result["ok"] = True
+                    result["message"] = "login requested"
+                json_response(self, result)
             except Exception as exc:
                 json_response(self, {"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return

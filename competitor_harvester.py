@@ -548,6 +548,29 @@ LOW_VALUE_URL_TOKENS = {
     "alternatives",
 }
 
+LOGIN_POOL_EXCLUDE_HINTS = {
+    "career",
+    "careers",
+    "job",
+    "jobs",
+    "hiring",
+    "recruit",
+    "recruitment",
+    "campus",
+    "talent",
+    "mokahr",
+    "greenhouse",
+    "lever.co",
+    "workday",
+    "职位",
+    "招聘",
+    "校园招聘",
+    "社招",
+    "人才",
+    "投递",
+    "简历",
+}
+
 BOILERPLATE_PHRASES = {
     "亲，请登录",
     "亲请登录",
@@ -3440,6 +3463,27 @@ def competitor_has_relevance(competitor: str, *values: str) -> bool:
     return any(term in haystack or term in compact_haystack for term in competitor_relevance_terms(competitor))
 
 
+def competitor_strong_binding(competitor: str, *values: str) -> bool:
+    haystack = " ".join(values).lower()
+    compact_haystack = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", haystack)
+    compact_competitor = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", competitor.lower())
+    if compact_competitor and compact_competitor in compact_haystack:
+        return True
+    if ".ai" in competitor.lower():
+        return False
+    raw_tokens = re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]+", competitor.lower())
+    semantic_tokens = [
+        token
+        for token in raw_tokens
+        if len(token) > 1 and token not in GENERIC_COMPETITOR_TERMS
+    ]
+    if len(semantic_tokens) > 1:
+        if any(len(token) <= 2 for token in semantic_tokens):
+            return False
+        return all(token in haystack or token in compact_haystack for token in semantic_tokens)
+    return competitor_has_relevance(competitor, *values)
+
+
 def low_value_url_reason(url: str, title: str = "", snippet: str = "", competitor: str = "") -> str:
     parsed = urlparse(url)
     domain = domain_of(url)
@@ -3547,10 +3591,18 @@ def official_domain_confidence(competitor: str, url: str, title: str = "", snipp
     haystack = f"{url} {title} {snippet}".lower()
     compact_domain = re.sub(r"[^a-z0-9]+", "", domain)
     compact_competitor = re.sub(r"[^a-z0-9]+", "", competitor.lower())
+    raw_tokens = re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]+", competitor.lower())
+    semantic_tokens = [
+        token
+        for token in raw_tokens
+        if len(token) > 1 and token not in GENERIC_COMPETITOR_TERMS
+    ]
     input_domain = competitor_input_domain(competitor)
     input_domain_match = bool(input_domain and domain_matches(domain, {input_domain}))
     domain_brand_match = any(term and any(term in part for part in parts) for term in terms)
     primary_brand_match = bool(terms and terms[0] and any(terms[0] in part for part in parts))
+    if len(semantic_tokens) > 1 and not input_domain_match and not competitor_strong_binding(competitor, url, title, snippet):
+        return 0
     if terms and not domain_brand_match and not input_domain_match and compact_competitor != compact_domain:
         return 0
     if len(terms) > 1 and terms[0] and not primary_brand_match and not input_domain_match:
@@ -3561,6 +3613,8 @@ def official_domain_confidence(competitor: str, url: str, title: str = "", snipp
         score += 5
     if compact_competitor and compact_competitor == compact_domain:
         score += 5
+    elif compact_competitor and compact_competitor in compact_domain and competitor_strong_binding(competitor, url, title, snippet):
+        score += 2
     if first_part and first_part in terms:
         score += 4
     elif terms and terms[0] and terms[0] in first_part:
@@ -5522,9 +5576,51 @@ def audit_requires_user_login(row: Mapping[str, Any]) -> bool:
     return looks_like_login_form(textify(row.get("url")), textify(row.get("title")), haystack)
 
 
+def login_pool_excluded_by_context(*values: str) -> bool:
+    haystack = " ".join(textify(value) for value in values).lower()
+    return bool(keyword_hits(haystack, LOGIN_POOL_EXCLUDE_HINTS))
+
+
+def audit_login_queue_eligible(row: Mapping[str, Any]) -> bool:
+    if not audit_requires_user_login(row):
+        return False
+    if textify(row.get("automated_review_status")).lower() == "login_skipped_by_user":
+        return False
+    competitor = textify(row.get("competitor"))
+    url = textify(row.get("login_assist_url") or row.get("url") or row.get("gui_review_url"))
+    title = textify(row.get("title"))
+    snippet = textify(row.get("cleaned_excerpt_sample") or row.get("snippet"))
+    reason = textify(row.get("reason") or row.get("suggested_next_step"))
+    if login_pool_excluded_by_context(url, title, snippet):
+        return False
+    if competitor_strong_binding(competitor, url, title, snippet):
+        return True
+    source_kind = textify(row.get("source_kind"))
+    matched_fields = textify(row.get("matched_fields"))
+    value_signals = textify(row.get("value_signals"))
+    try:
+        pm_value = int(float(textify(row.get("pm_value_score")) or 0))
+    except ValueError:
+        pm_value = 0
+    try:
+        category_fit = int(float(textify(row.get("category_fit_score")) or 0))
+    except ValueError:
+        category_fit = 0
+    has_value_signal = bool(matched_fields or ("决策相关" in value_signals and "信息增量" in value_signals))
+    if source_kind.startswith("official") and has_value_signal:
+        return True
+    if textify(row.get("selected")).lower() == "yes" and (has_value_signal or pm_value >= 2 or category_fit >= 1):
+        return True
+    if pm_value >= 3 and category_fit >= 1 and competitor_has_relevance(competitor, url, title, snippet, reason):
+        return True
+    return False
+
+
 def row_requires_login_action(row: Mapping[str, Any]) -> bool:
     status = textify(row.get("automated_review_status")).lower()
     hard_gate = textify(row.get("hard_gate") or row.get("rejection_code")).lower()
+    if status == "login_skipped_by_user":
+        return False
     return (
         textify(row.get("requires_user_login")).lower() == "yes"
         or textify(row.get("review_reason")) == "login_required_user_action"
@@ -5578,11 +5674,22 @@ def login_click_marker_path(out_dir: Path, competitor: str, url: str) -> Path:
     return Path(out_dir) / "login_click_requests" / f"{login_click_marker_id(competitor, url)}.json"
 
 
+def login_skip_marker_path(out_dir: Path, competitor: str, url: str) -> Path:
+    return Path(out_dir) / "login_skip_requests" / f"{login_click_marker_id(competitor, url)}.json"
+
+
 def login_click_requested(out_dir: Path, row: Mapping[str, Any]) -> bool:
     url = review_target_url(row)
     if not url:
         return False
     return login_click_marker_path(out_dir, textify(row.get("competitor")), url).exists()
+
+
+def login_skip_requested(out_dir: Path, row: Mapping[str, Any]) -> bool:
+    url = review_target_url(row)
+    if not url:
+        return False
+    return login_skip_marker_path(out_dir, textify(row.get("competitor")), url).exists()
 
 
 def dedupe_login_review_rows(rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
@@ -5723,7 +5830,7 @@ def rows_from_manual_review_queue(
             and textify(row.get("decision_status")).lower() in {"signal", "accepted"}
             and not textify(row.get("hard_gate")).startswith("rejected_auth_or_transaction_shell")
         )
-        login_required = audit_requires_user_login(row)
+        login_required = audit_login_queue_eligible(row)
         if textify(row.get("gui_review_candidate")).lower() != "yes" and not login_required and not adapter_reviewable:
             continue
         key = (textify(row.get("competitor")), url)
@@ -6332,8 +6439,10 @@ class LoginAssistSession:
     def queue_rows(self) -> List[Dict[str, Any]]:
         rows: List[Dict[str, Any]] = []
         for key, row in self.rows_by_key.items():
+            if login_skip_requested(self.out_dir, row):
+                continue
             result = self.results_by_key.get(key)
-            if result and textify(result.get("automated_review_status")) == "login_assisted_snapshot_captured":
+            if result and textify(result.get("automated_review_status")) in {"login_assisted_snapshot_captured", "login_skipped_by_user"}:
                 continue
             pending = self._result_from_row(
                 row,
@@ -6363,6 +6472,14 @@ class LoginAssistSession:
         while pending and time.time() < deadline:
             for key in list(pending):
                 row = self.rows_by_key[key]
+                if login_skip_requested(self.out_dir, row):
+                    self.results_by_key[key] = self._result_from_row(
+                        row,
+                        "login_skipped_by_user",
+                        next_step="用户已在 UI 登录池选择跳过；该站点不再进入登录等待。",
+                    )
+                    pending.remove(key)
+                    continue
                 if not login_click_requested(self.out_dir, row):
                     continue
                 if not self.context and not self.start():
@@ -6425,6 +6542,14 @@ class LoginAssistSession:
         slug = f"{index:03d}-{slugify(textify(row.get('competitor')) or domain_of(url) or 'login')}"
         screenshot_path = self.snapshot_dir / f"{slug}-login-assisted.png"
         text_path = self.snapshot_dir / f"{slug}-login-assisted.txt"
+        if login_skip_requested(self.out_dir, row):
+            return (
+                "login_skipped_by_user",
+                "",
+                "",
+                "",
+                "用户已在 UI 登录池选择跳过；该站点不再进入登录等待。",
+            )
         if not login_click_requested(self.out_dir, row):
             return (
                 "awaiting_user_login",
@@ -6696,7 +6821,7 @@ def login_required_queue_rows(
             continue
         seen.add(key)
         gui = gui_by_key.get(key, {})
-        if textify(gui.get("automated_review_status")).lower() == "login_assisted_snapshot_captured":
+        if textify(gui.get("automated_review_status")).lower() in {"login_assisted_snapshot_captured", "login_skipped_by_user"}:
             continue
         rows.append(
             {

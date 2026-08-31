@@ -7,6 +7,8 @@ from competitor_harvester import (
     SearchResult,
     build_product_collection_plan,
     build_search_query_templates,
+    competitor_strong_binding,
+    official_domain_confidence,
     rows_from_evidence_audit,
     rows_from_manual_review_queue,
     write_pre_crawl_plan,
@@ -83,6 +85,39 @@ class SourceStrategyTest(unittest.TestCase):
         self.assertIn("service area", first_block)
         self.assertIn("safety report", first_block)
         self.assertNotIn("competitors alternatives", first_block)
+
+    def test_multi_word_competitor_official_domain_needs_full_binding(self):
+        self.assertFalse(competitor_strong_binding("Apollo Go", "go 访问 apollo 配置"))
+        self.assertTrue(competitor_strong_binding("Apollo Go", "Apollo Go by Baidu begins testing robotaxi services"))
+        self.assertFalse(competitor_strong_binding("Pony.ai", "Pony model download"))
+        self.assertTrue(competitor_strong_binding("Pony.ai", "Pony AI deploys robotaxi service"))
+        self.assertEqual(
+            official_domain_confidence(
+                "Apollo Go",
+                "https://apollo.io",
+                "Apollo.io: B2B sales intelligence platform",
+                "Find prospects and enrich sales data.",
+            ),
+            0,
+        )
+        self.assertEqual(
+            official_domain_confidence(
+                "Apollo Go",
+                "https://www.apolloconfig.com",
+                "Apollo 配置中心",
+                "分布式配置中心文档和部署教程。",
+            ),
+            0,
+        )
+        self.assertGreaterEqual(
+            official_domain_confidence(
+                "Apollo Go",
+                "https://apollo-go.example.com",
+                "Apollo Go official robotaxi service",
+                "Apollo Go autonomous vehicle operation and service area.",
+            ),
+            4,
+        )
 
     def test_evidence_audit_marks_valuable_video_for_gui_review_with_value_rules(self):
         plan = build_product_collection_plan(
