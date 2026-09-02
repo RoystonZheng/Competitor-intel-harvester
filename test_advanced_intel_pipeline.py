@@ -20,6 +20,7 @@ from competitor_harvester import (
     page_quality_issue,
     page_extracts_from_gui_review_rows,
     login_required_queue_rows,
+    run_codex_review,
     rows_from_manual_review_queue,
     rows_from_images,
 )
@@ -233,6 +234,29 @@ class AdvancedIntelPipelineTest(unittest.TestCase):
         self.assertTrue(downloaded_file_exists)
         self.assertIn("searxng", Path(downloaded[0]["file"]).parts)
         self.assertTrue(any(row["source"] == "searxng_image_download" for row in rows))
+
+    def test_codex_review_missing_cli_writes_fallback_analysis(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            (out_dir / "analysis.md").write_text(
+                "# 基线竞品分析报告\n\n- 结论：官方定价页已抓取。",
+                encoding="utf-8",
+            )
+            (out_dir / "codex_input.md").write_text("evidence bundle", encoding="utf-8")
+
+            ok = run_codex_review(
+                out_dir,
+                ["Demo"],
+                codex_command="definitely-missing-codex-command",
+                model="",
+                timeout=1,
+            )
+
+            self.assertTrue(ok)
+            self.assertTrue((out_dir / "codex_analysis.md").exists())
+            self.assertTrue((out_dir / "codex_review.json").exists())
+            self.assertIn("Codex CLI 未找到", (out_dir / "codex_analysis.md").read_text(encoding="utf-8"))
+            self.assertIn("Codex command not found", (out_dir / "codex_run.log").read_text(encoding="utf-8"))
 
     def test_gui_review_queue_captures_public_page_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:

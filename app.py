@@ -52,10 +52,38 @@ DEFAULT_BOOTSTRAP_LABELS_PATH = APP_DIR / "training_data" / "bootstrap_labels.cs
 DEFAULT_REVIEW_LABELS_PATH = APP_DIR / "training_data" / "review_labels.csv"
 DEFAULT_SEARCH_CARDS_DIR = APP_DIR / "search_cards"
 INTERNAL_OUTPUT_DIR_NAME = "_internal"
+EXTRA_BIN_DIRS = [
+    Path.home() / ".local" / "bin",
+    Path.home() / ".codex" / "bin",
+    Path("/opt/homebrew/bin"),
+    Path("/usr/local/bin"),
+]
 
 
 def worker_python() -> str:
     return str(VENV_PYTHON if VENV_PYTHON.exists() else Path(sys.executable))
+
+
+def expanded_path_env() -> str:
+    current = os.environ.get("PATH", "")
+    extras = [str(path) for path in EXTRA_BIN_DIRS if path.exists()]
+    return os.pathsep.join([*extras, current]) if extras else current
+
+
+def resolve_executable_command(command: str) -> str:
+    command = (command or "").strip() or "codex"
+    expanded = Path(command).expanduser()
+    if (os.sep in command or command.startswith("~")) and expanded.exists():
+        return str(expanded)
+    found = shutil.which(command, path=expanded_path_env())
+    if found:
+        return found
+    if command == "codex":
+        for directory in EXTRA_BIN_DIRS:
+            candidate = directory / "codex"
+            if candidate.exists():
+                return str(candidate)
+    return ""
 
 
 @dataclass
@@ -80,22 +108,16 @@ JOBS_LOCK = threading.Lock()
 
 PRIMARY_ARTIFACTS = [
     "实验计时记录.md",
-    "实验计时记录.json",
     "抓取前采集计划.md",
     "采集原则和筛选原则.md",
-    "收录过滤策略设计.md",
     "所有采集来源.csv",
     "未经筛选的采集内容.md",
     "筛选后的采集内容.md",
     "竞品分析报告_图片内嵌版.md",
-    "问题页面核验清单.md",
     "问题页面核验清单.csv",
-    "自动竞品发现.md",
     "自动竞品发现.csv",
     "结构化事实.csv",
-    "事实聚类.md",
     "事实聚类.csv",
-    "本地筛选模型状态.json",
     "人工抽样标注表.csv",
 ]
 
@@ -877,7 +899,7 @@ INDEX_HTML = r"""<!doctype html>
 
       const actions = document.createElement('div');
       actions.className = 'login-review-actions';
-      [['问题页面核验清单.md', '打开核验说明'], ['问题页面核验清单.csv', '下载标注表'], ['人工抽样标注表.csv', '下载抽样表']].forEach(([file, label]) => {
+      [['问题页面核验清单.csv', '下载问题核验表'], ['人工抽样标注表.csv', '下载抽样标注表']].forEach(([file, label]) => {
         const link = document.createElement('a');
         link.href = `/download?job=${encodeURIComponent(job.id)}&file=${encodeURIComponent(file)}`;
         link.target = '_blank';
@@ -888,7 +910,7 @@ INDEX_HTML = r"""<!doctype html>
       const trainBtn = document.createElement('button');
       trainBtn.type = 'button';
       trainBtn.textContent = '核验后训练模型';
-      trainBtn.addEventListener('click', () => trainModelFromUi(true));
+      trainBtn.addEventListener('click', () => trainModelFromUi(true, trainBtn));
       actions.appendChild(trainBtn);
       reviewModalBodyEl.appendChild(actions);
 
@@ -916,6 +938,7 @@ INDEX_HTML = r"""<!doctype html>
     }
 
     function renderJob(job) {
+      currentJobId = job.id || currentJobId;
       statusEl.className = statusClass(job.status);
       statusEl.textContent = job.status || 'unknown';
       jobMetaEl.textContent = job.id ? `任务 ${job.id} · ${job.out_dir || ''}` : '';
@@ -1097,8 +1120,9 @@ INDEX_HTML = r"""<!doctype html>
 
     modelStatusBtn.addEventListener('click', refreshModelStatus);
 
-    async function trainModelFromUi(includeCurrentJob) {
+    async function trainModelFromUi(includeCurrentJob, triggerButton) {
       trainModelBtn.disabled = true;
+      if (triggerButton) triggerButton.disabled = true;
       modelStatusTextEl.textContent = '训练中';
       trainingLogsEl.hidden = false;
       trainingLogsEl.textContent = '';
@@ -1109,22 +1133,29 @@ INDEX_HTML = r"""<!doctype html>
         min_labeled_rows: Number(minLabelsEl.value || 10),
         min_card_labeled_rows: 3,
         job_id: currentJobId || '',
-        include_problem_reviews: Boolean(includeCurrentJob && currentJobId)
+        include_problem_reviews: Boolean(includeCurrentJob)
       };
-      const res = await fetch('/api/ml/train', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      const data = await res.json();
-      trainingLogsEl.textContent = JSON.stringify(data, null, 2);
-      modelStatusTextEl.textContent = res.ok
-        ? `训练完成：${data.training_rows || 0} 条标注，生成搜索卡片 ${data.search_cards ? data.search_cards.written_cards || 0 : 0} 张`
-        : `训练失败：${data.error || 'unknown error'}。若提示样本不足，请先填写 human_label。`;
-      trainModelBtn.disabled = false;
+      try {
+        const res = await fetch('/api/ml/train', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json().catch(() => ({ error: '服务返回内容不是 JSON' }));
+        trainingLogsEl.textContent = JSON.stringify(data, null, 2);
+        modelStatusTextEl.textContent = res.ok
+          ? `训练完成：${data.training_rows || 0} 条标注，生成搜索卡片 ${data.search_cards ? data.search_cards.written_cards || 0 : 0} 张`
+          : `训练失败：${data.error || 'unknown error'}。若提示样本不足，请先填写 human_label。`;
+      } catch (error) {
+        trainingLogsEl.textContent = JSON.stringify({ error: String(error) }, null, 2);
+        modelStatusTextEl.textContent = `训练失败：${String(error)}`;
+      } finally {
+        trainModelBtn.disabled = false;
+        if (triggerButton) triggerButton.disabled = false;
+      }
     }
 
-    trainModelBtn.addEventListener('click', () => trainModelFromUi(true));
+    trainModelBtn.addEventListener('click', () => trainModelFromUi(true, trainModelBtn));
     closeReviewModalBtn.addEventListener('click', () => { reviewModalEl.hidden = true; });
   </script>
 </body>
@@ -1757,6 +1788,20 @@ def safe_job_dir(job_id: str) -> Optional[Path]:
     return out_dir if out_dir.is_dir() else None
 
 
+def latest_job_dir_with_training_reviews() -> Optional[Path]:
+    if not RUNS_DIR.exists():
+        return None
+    candidates: List[Path] = []
+    for item in RUNS_DIR.iterdir():
+        if not item.is_dir():
+            continue
+        if artifact_path(item, "人工抽样标注表.csv") or artifact_path(item, "问题页面核验清单.csv"):
+            candidates.append(item)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
 def login_click_marker_id(competitor: str, url: str) -> str:
     parsed = urlparse(url)
     domain = (parsed.netloc or "").lower().removeprefix("www.")
@@ -1978,6 +2023,8 @@ def train_local_filter_model(payload: dict) -> dict:
     if bool_payload(payload, "include_problem_reviews", False):
         job_id = str(payload.get("job_id") or "").strip()
         job_dir = safe_job_dir(job_id)
+        if not job_dir:
+            job_dir = latest_job_dir_with_training_reviews()
         if job_dir:
             for candidate_names in (
                 ("人工抽样标注表.csv", "training_review_sample.csv"),
@@ -2008,7 +2055,7 @@ def train_local_filter_model(payload: dict) -> dict:
     report = {
         "ok": True,
         "labels_path": str(labels_path),
-        "label_paths": [str(path) for path in label_paths],
+        "label_paths": [str(path.resolve()) for path in label_paths],
         "model_path": str(model_out),
         "checkpoint_path": str(checkpoint_path),
         "checkpoint_alias_path": str(checkpoint_alias_path),
@@ -2118,6 +2165,9 @@ def start_job(payload: dict) -> Job:
     if bool_payload(payload, "codex_review"):
         cmd.append("--codex-review")
         cmd.append("--require-codex-review")
+        codex_command = resolve_executable_command(str(payload.get("codex_command") or os.getenv("CODEX_COMMAND", "codex")))
+        if codex_command:
+            cmd += ["--codex-command", codex_command]
         codex_model = str(payload.get("codex_model") or "").strip()
         if codex_model:
             cmd += ["--codex-model", codex_model]
@@ -2213,10 +2263,10 @@ def check_environment(searxng_url: str, proxy_url: str = "") -> dict:
         }
     except Exception as exc:
         python = {"executable": py, "crawl4ai": False, "icrawler": False, "error": str(exc)}
-    codex_path = shutil.which("codex")
+    codex_path = resolve_executable_command(os.getenv("CODEX_COMMAND", "codex"))
     if codex_path:
         try:
-            proc = subprocess.run(["codex", "--version"], text=True, capture_output=True, timeout=5)
+            proc = subprocess.run([codex_path, "--version"], text=True, capture_output=True, timeout=5, env={**os.environ, "PATH": expanded_path_env()})
             codex = {"ok": proc.returncode == 0, "message": (proc.stdout or proc.stderr).strip(), "path": codex_path}
         except Exception as exc:
             codex = {"ok": False, "message": str(exc), "path": codex_path}
@@ -2236,6 +2286,10 @@ def check_environment(searxng_url: str, proxy_url: str = "") -> dict:
 
 def subprocess_env(proxy_url: str = "") -> dict:
     env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    env["PATH"] = expanded_path_env()
+    codex_command = resolve_executable_command(env.get("CODEX_COMMAND", "codex"))
+    if codex_command:
+        env["CODEX_COMMAND"] = codex_command
     for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
         env.pop(key, None)
     if proxy_url:

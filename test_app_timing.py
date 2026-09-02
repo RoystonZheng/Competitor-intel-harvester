@@ -80,7 +80,7 @@ class JobTimingTest(unittest.TestCase):
             self.assertTrue(timing_md.exists())
             self.assertEqual(record["elapsed_label"], "00:01:00")
             self.assertIn("实验计时记录.md", artifact_names)
-            self.assertIn("实验计时记录.json", artifact_names)
+            self.assertNotIn("实验计时记录.json", artifact_names)
 
     def test_load_login_required_reviews_from_chinese_csv(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -234,6 +234,58 @@ class JobTimingTest(unittest.TestCase):
             self.assertEqual(report["training_rows"], 3)
             self.assertIn(str(sample_path.resolve()), report["label_paths"])
             self.assertTrue((root / "models" / "filter_model.pt").exists())
+
+    def test_train_local_filter_model_uses_latest_job_sample_when_page_was_refreshed(self):
+        original_runs_dir = app.RUNS_DIR
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app.RUNS_DIR = root / "runs"
+            old_job_dir = app.RUNS_DIR / "20260830-120000-111111"
+            latest_job_dir = app.RUNS_DIR / "20260831-120000-abcdef"
+            old_job_dir.mkdir(parents=True)
+            latest_job_dir.mkdir(parents=True)
+            labels_path = root / "review_labels.csv"
+            labels_path.write_text(
+                "competitor,title,url,snippet,human_label,human_reason\n",
+                encoding="utf-8",
+            )
+            (old_job_dir / "人工抽样标注表.csv").write_text(
+                "competitor,title,url,snippet,source_kind,page_role,human_label,human_reason\n"
+                "Old,Old page,https://old.example,old content,official,overview,include,old run\n",
+                encoding="utf-8-sig",
+            )
+            sample_path = latest_job_dir / "人工抽样标注表.csv"
+            sample_path.write_text(
+                "competitor,title,url,snippet,source_kind,page_role,human_label,human_reason\n"
+                "Demo,Official Pricing,https://demo.example/pricing,pricing tiers api,official,pricing,include,official pricing page\n"
+                "Demo,Login Shell,https://demo.example/login,email password sign in,account,auth_or_account_shell,exclude,login only\n"
+                "Demo,Forum Rumor,https://forum.example/demo,unverified roadmap rumor,community,discussion,verify_later,needs source check\n",
+                encoding="utf-8-sig",
+            )
+
+            try:
+                report = app.train_local_filter_model(
+                    {
+                        "labels_path": str(labels_path),
+                        "model_out": str(root / "models" / "filter_model.pt"),
+                        "cards_dir": str(root / "search_cards"),
+                        "min_labeled_rows": 3,
+                        "include_problem_reviews": True,
+                    }
+                )
+            finally:
+                app.RUNS_DIR = original_runs_dir
+
+            self.assertEqual(report["training_rows"], 3)
+            self.assertIn(str(sample_path.resolve()), report["label_paths"])
+            self.assertNotIn(str((old_job_dir / "人工抽样标注表.csv").resolve()), report["label_paths"])
+
+    def test_problem_review_training_button_reenables_after_request(self):
+        self.assertIn("trainModelFromUi(includeCurrentJob, triggerButton)", app.INDEX_HTML)
+        self.assertIn("trainModelFromUi(true, trainBtn)", app.INDEX_HTML)
+        self.assertIn("currentJobId = job.id || currentJobId;", app.INDEX_HTML)
+        self.assertIn("finally", app.INDEX_HTML)
+        self.assertIn("triggerButton.disabled = false", app.INDEX_HTML)
 
     def test_model_status_for_ui_bootstraps_default_model_when_missing(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -8,25 +8,40 @@ from competitor_harvester import (
     PageExtract,
     build_problem_review_rows,
     slim_output_directory,
+    write_chinese_export_aliases,
     write_problem_review_outputs,
 )
 
 
 class OutputSlimmingTest(unittest.TestCase):
-    def test_ui_shows_one_embedded_analysis_report_and_one_problem_review_file(self):
+    def test_ui_shows_single_user_facing_format_for_duplicate_exports(self):
         with tempfile.TemporaryDirectory() as tmp:
             out_dir = Path(tmp)
             for name in [
+                "实验计时记录.md",
+                "实验计时记录.json",
+                "抓取前采集计划.md",
+                "抓取前采集计划.json",
                 "竞品分析报告_图片内嵌版.md",
                 "final_analysis.md",
                 "Codex分析报告.md",
                 "analysis.md",
                 "report.md",
+                "收录过滤策略设计.md",
+                "本地筛选模型状态.json",
                 "人工复核队列.md",
                 "需登录队列.md",
                 "GUI自动复核结果.md",
                 "问题页面核验清单.md",
                 "问题页面核验清单.csv",
+                "自动竞品发现.md",
+                "自动竞品发现.csv",
+                "自动竞品发现.json",
+                "结构化事实.csv",
+                "结构化事实.json",
+                "事实聚类.md",
+                "事实聚类.csv",
+                "事实聚类.json",
                 "人工抽样标注表.csv",
             ]:
                 (out_dir / name).write_text("x", encoding="utf-8")
@@ -43,9 +58,23 @@ class OutputSlimmingTest(unittest.TestCase):
             artifact_names = [row["name"] for row in app.job_snapshot(job)["artifacts"]]
 
         self.assertIn("竞品分析报告_图片内嵌版.md", artifact_names)
-        self.assertIn("问题页面核验清单.md", artifact_names)
+        self.assertIn("实验计时记录.md", artifact_names)
+        self.assertIn("抓取前采集计划.md", artifact_names)
         self.assertIn("问题页面核验清单.csv", artifact_names)
+        self.assertIn("自动竞品发现.csv", artifact_names)
+        self.assertIn("结构化事实.csv", artifact_names)
+        self.assertIn("事实聚类.csv", artifact_names)
         self.assertIn("人工抽样标注表.csv", artifact_names)
+        self.assertNotIn("实验计时记录.json", artifact_names)
+        self.assertNotIn("抓取前采集计划.json", artifact_names)
+        self.assertNotIn("问题页面核验清单.md", artifact_names)
+        self.assertNotIn("自动竞品发现.md", artifact_names)
+        self.assertNotIn("自动竞品发现.json", artifact_names)
+        self.assertNotIn("结构化事实.json", artifact_names)
+        self.assertNotIn("事实聚类.md", artifact_names)
+        self.assertNotIn("事实聚类.json", artifact_names)
+        self.assertNotIn("收录过滤策略设计.md", artifact_names)
+        self.assertNotIn("本地筛选模型状态.json", artifact_names)
         self.assertNotIn("final_analysis.md", artifact_names)
         self.assertNotIn("Codex分析报告.md", artifact_names)
         self.assertNotIn("analysis.md", artifact_names)
@@ -58,10 +87,21 @@ class OutputSlimmingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out_dir = Path(tmp)
             for name in [
+                "实验计时记录.md",
+                "实验计时记录.json",
                 "竞品分析报告_图片内嵌版.md",
                 "问题页面核验清单.md",
                 "问题页面核验清单.csv",
                 "所有采集来源.csv",
+                "自动竞品发现.md",
+                "自动竞品发现.csv",
+                "自动竞品发现.json",
+                "结构化事实.csv",
+                "结构化事实.json",
+                "事实聚类.md",
+                "事实聚类.csv",
+                "事实聚类.json",
+                "本地筛选模型状态.json",
                 "final_analysis.md",
                 "raw.json",
                 "pages.csv",
@@ -76,14 +116,51 @@ class OutputSlimmingTest(unittest.TestCase):
             self.assertTrue((out_dir / "竞品分析报告_图片内嵌版.md").exists())
             self.assertTrue((out_dir / "问题页面核验清单.csv").exists())
             self.assertTrue((out_dir / "所有采集来源.csv").exists())
+            self.assertTrue((out_dir / "自动竞品发现.csv").exists())
+            self.assertTrue((out_dir / "结构化事实.csv").exists())
+            self.assertTrue((out_dir / "事实聚类.csv").exists())
+            self.assertFalse((out_dir / "实验计时记录.json").exists())
+            self.assertFalse((out_dir / "问题页面核验清单.md").exists())
+            self.assertFalse((out_dir / "自动竞品发现.md").exists())
+            self.assertFalse((out_dir / "自动竞品发现.json").exists())
+            self.assertFalse((out_dir / "结构化事实.json").exists())
+            self.assertFalse((out_dir / "事实聚类.md").exists())
+            self.assertFalse((out_dir / "事实聚类.json").exists())
+            self.assertFalse((out_dir / "本地筛选模型状态.json").exists())
             self.assertFalse((out_dir / "final_analysis.md").exists())
             self.assertFalse((out_dir / "raw.json").exists())
             self.assertFalse((out_dir / "pages.csv").exists())
             self.assertFalse((out_dir / "manual_review_queue.csv").exists())
             self.assertFalse((out_dir / "run.log").exists())
+            self.assertTrue((out_dir / "_internal" / "实验计时记录.json").exists())
+            self.assertTrue((out_dir / "_internal" / "问题页面核验清单.md").exists())
             self.assertTrue((out_dir / "_internal" / "final_analysis.md").exists())
             self.assertTrue((out_dir / "_internal" / "raw.json").exists())
             self.assertTrue((out_dir / "_internal" / "run.log").exists())
+
+    def test_chinese_aliases_are_created_only_for_primary_deliverables(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            for name in [
+                "all_sources.csv",
+                "final_analysis_embedded.md",
+                "problem_pages_review.csv",
+                "problem_pages_review.md",
+                "codex_input.md",
+                "screening_strategy.md",
+                "raw.json",
+            ]:
+                (out_dir / name).write_text("x", encoding="utf-8")
+
+            write_chinese_export_aliases(out_dir)
+
+            self.assertTrue((out_dir / "所有采集来源.csv").exists())
+            self.assertTrue((out_dir / "竞品分析报告_图片内嵌版.md").exists())
+            self.assertTrue((out_dir / "问题页面核验清单.csv").exists())
+            self.assertFalse((out_dir / "问题页面核验清单.md").exists())
+            self.assertFalse((out_dir / "Codex分析输入证据.md").exists())
+            self.assertFalse((out_dir / "收录过滤策略设计.md").exists())
+            self.assertFalse((out_dir / "原始数据.json").exists())
 
     def test_ui_artifact_lookup_finds_archived_internal_file(self):
         with tempfile.TemporaryDirectory() as tmp:

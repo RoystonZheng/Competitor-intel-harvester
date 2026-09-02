@@ -141,29 +141,51 @@ CHINESE_EXPORT_ALIASES = {
 }
 
 INTERNAL_OUTPUT_DIR_NAME = "_internal"
+EXTRA_BIN_DIRS = [
+    Path.home() / ".local" / "bin",
+    Path.home() / ".codex" / "bin",
+    Path("/opt/homebrew/bin"),
+    Path("/usr/local/bin"),
+]
 
 ROOT_OUTPUT_FILES = {
+    "实验计时记录.md",
     "抓取前采集计划.md",
     "采集原则和筛选原则.md",
-    "收录过滤策略设计.md",
     "所有采集来源.csv",
     "未经筛选的采集内容.md",
     "筛选后的采集内容.md",
     "竞品分析报告_图片内嵌版.md",
-    "问题页面核验清单.md",
     "问题页面核验清单.csv",
-    "自动竞品发现.md",
     "自动竞品发现.csv",
     "结构化事实.csv",
-    "事实聚类.md",
     "事实聚类.csv",
-    "本地筛选模型状态.json",
     "人工抽样标注表.csv",
-    "实验计时记录.md",
-    "实验计时记录.json",
     "downloaded_images",
     "gui_review_snapshots",
 }
+
+def expanded_path_env() -> str:
+    current = os.environ.get("PATH", "")
+    extras = [str(path) for path in EXTRA_BIN_DIRS if path.exists()]
+    return os.pathsep.join([*extras, current]) if extras else current
+
+
+def resolve_executable_command(command: str) -> str:
+    command = (command or "").strip() or "codex"
+    expanded = Path(command).expanduser()
+    if (os.sep in command or command.startswith("~")) and expanded.exists():
+        return str(expanded)
+    found = shutil.which(command, path=expanded_path_env())
+    if found:
+        return found
+    if command == "codex":
+        for directory in EXTRA_BIN_DIRS:
+            candidate = directory / "codex"
+            if candidate.exists():
+                return str(candidate)
+    return ""
+
 
 FINAL_REPORT_FRAMEWORK = [
     ("0. 核心结论与决策建议", "直接回答 PM 应该关注什么、优先验证什么、下一步怎么做。"),
@@ -8780,6 +8802,8 @@ def write_embedded_markdown_copy(src_path: Path, dst_path: Path) -> None:
 
 def write_chinese_export_aliases(out_dir: Path) -> None:
     for source_name, alias_name in CHINESE_EXPORT_ALIASES.items():
+        if alias_name not in ROOT_OUTPUT_FILES:
+            continue
         source = out_dir / source_name
         alias = out_dir / alias_name
         if source.exists():
@@ -8825,7 +8849,7 @@ def slim_output_directory(out_dir: Path, keep_run_log: bool = True) -> None:
             manifest.write_text(
                 "# 内部文件\n\n"
                 "这里保存中间结果、兼容旧版本的英文文件、调试日志和原始 JSON。"
-                "根目录只保留默认交付物：图片内嵌分析报告、问题页面核验清单、采集来源、筛选前后内容、原则文档、结构化事实和人工标注表。\n",
+                "根目录只保留单一格式的中文交付物：图片内嵌分析报告、采集来源、筛选前后内容、问题核验 CSV、抽样标注 CSV、结构化事实、事实聚类和必要原则文档。\n",
                 encoding="utf-8",
             )
 
@@ -10084,7 +10108,7 @@ def run_pre_crawl_ai_strategy(
         "report_focus": plan.report_focus,
         "source_policy_notes": plan.source_policy_notes,
     }
-    codex_path = shutil.which(codex_command)
+    codex_path = resolve_executable_command(codex_command)
     if not codex_path:
         (out_dir / "pre_crawl_ai_strategy.json").write_text(
             json.dumps({"ok": False, "error": f"Codex command not found: {codex_command}", **fallback_payload}, ensure_ascii=False, indent=2),
@@ -10146,7 +10170,7 @@ def run_pre_crawl_ai_strategy(
             text=True,
             capture_output=True,
             timeout=timeout,
-            env={**os.environ, "CODEX_CI": "1"},
+            env={**os.environ, "CODEX_CI": "1", "PATH": expanded_path_env()},
             cwd=str(out_dir),
         )
     except Exception as exc:
@@ -10199,6 +10223,33 @@ def write_codex_decisions_csv(path: Path, payload: Dict[str, Any]) -> None:
     )
 
 
+def write_codex_cli_fallback_analysis(out_dir: Path, competitors: Sequence[str], codex_command: str) -> None:
+    baseline_path = out_dir / "analysis.md"
+    if baseline_path.exists():
+        baseline = prepare_analysis_markdown(baseline_path.read_text(encoding="utf-8"), out_dir)
+    else:
+        baseline = "# 竞品分析报告\n\n本轮没有生成基线分析内容，请查看采集日志和证据文件。"
+    notice = (
+        "# Codex 分析报告（本地降级版）\n\n"
+        f"> Codex CLI 未找到：`{codex_command}`。本轮先使用采集器规则化分析结果生成正式报告，"
+        "避免交付物空缺；安装或配置 Codex CLI 后会自动切回 Codex 收录判断和分析。\n\n"
+        f"> 本轮竞品：{', '.join(competitors) if competitors else '未填写'}。\n\n"
+    )
+    (out_dir / "codex_analysis.md").write_text(notice + baseline, encoding="utf-8")
+    fallback_payload = {
+        "ok": False,
+        "fallback": True,
+        "error": f"Codex command not found: {codex_command}",
+        "analysis_markdown": notice + baseline,
+        "included_pages": [],
+        "excluded_pages": [],
+        "included_images": [],
+        "excluded_images": [],
+    }
+    (out_dir / "codex_review.json").write_text(json.dumps(fallback_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_codex_decisions_csv(out_dir / "codex_decisions.csv", fallback_payload)
+
+
 def run_codex_review(
     out_dir: Path,
     competitors: Sequence[str],
@@ -10206,11 +10257,16 @@ def run_codex_review(
     model: str,
     timeout: int,
 ) -> bool:
-    codex_path = shutil.which(codex_command)
+    codex_path = resolve_executable_command(codex_command)
     log_path = out_dir / "codex_run.log"
     if not codex_path:
-        log_path.write_text(f"Codex command not found: {codex_command}\n", encoding="utf-8")
-        return False
+        write_codex_cli_fallback_analysis(out_dir, competitors, codex_command)
+        log_path.write_text(
+            f"Codex command not found: {codex_command}\n"
+            "Fallback analysis was written from the local rule-generated report.\n",
+            encoding="utf-8",
+        )
+        return True
 
     schema_path = out_dir / "codex_review_schema.json"
     schema_path.write_text(json.dumps(codex_review_schema(), ensure_ascii=False, indent=2), encoding="utf-8")
@@ -10284,7 +10340,7 @@ Return JSON matching the provided schema exactly.
             text=True,
             capture_output=True,
             timeout=timeout,
-            env={**os.environ, "CODEX_CI": "1"},
+            env={**os.environ, "CODEX_CI": "1", "PATH": expanded_path_env()},
             cwd=str(out_dir),
         )
     except Exception as exc:
@@ -11211,7 +11267,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     write_embedded_markdown_copy(final_analysis, out_dir / "final_analysis_embedded.md")
     write_screening_strategy_doc(out_dir)
     write_chinese_export_aliases(out_dir)
-    slim_output_directory(out_dir, keep_run_log=True)
+    slim_output_directory(out_dir, keep_run_log=False)
 
     if fatal_after_export:
         print("[5/5] Done with blocking errors.")
