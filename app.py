@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import shutil
 import socket
@@ -28,13 +29,14 @@ from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 from filter_training import (
     bootstrap_filter_model_if_missing,
     build_training_rows,
     model_status,
+    normalize_label,
     save_filter_model,
     save_model_checkpoint_pt,
     save_model_weights,
@@ -128,6 +130,51 @@ FAILURE_ARTIFACTS = [
     "Codex运行日志.log",
     "run.log",
     "codex_run.log",
+]
+
+FEEDBACK_CATEGORY_ORDER = [
+    "失败/反爬/超时",
+    "待登录",
+    "内容不好放弃",
+    "主要内容来源",
+    "待核实线索",
+    "模型边界样本",
+]
+
+FEEDBACK_REVIEW_FIELDS = [
+    "source_job_id",
+    "feedback_category",
+    "competitor",
+    "title",
+    "url",
+    "domain",
+    "snippet",
+    "reason",
+    "model_conclusion",
+    "conclusion_label",
+    "counter_human_label",
+    "source_file",
+    "source_queue",
+    "problem_type",
+    "decision_status",
+    "hard_gate",
+    "source_kind",
+    "page_role",
+    "source_policy_tier",
+    "pending_verification",
+    "verification_reason",
+    "fact_type",
+    "increment_type",
+    "fact_group",
+    "ml_confidence",
+    "ml_include_score",
+    "ml_exclude_score",
+    "ml_verify_later_score",
+    "feedback_judgement",
+    "human_label",
+    "human_reason",
+    "feedback_status",
+    "reviewed_at",
 ]
 
 CHINESE_EXPORT_ALIASES = {
@@ -937,6 +984,123 @@ INDEX_HTML = r"""<!doctype html>
       reviewModalEl.hidden = false;
     }
 
+    async function sendFeedbackReview(job, row, judgement, button, statusNode, peerButton) {
+      if (!job.id) return;
+      button.disabled = true;
+      statusNode.textContent = judgement === 'qualified' ? '正在记录合格反馈' : '正在记录不合格反馈';
+      try {
+        const res = await fetch('/api/review/feedback', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            job: job.id,
+            competitor: row.competitor || '',
+            url: row.url || '',
+            feedback_category: row.feedback_category || '',
+            judgement
+          })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          button.disabled = false;
+          if (peerButton) peerButton.disabled = false;
+          statusNode.textContent = `反馈失败：${data.error || judgement}`;
+          return;
+        }
+        row.feedback_status = 'ready_for_training';
+        row.feedback_judgement = judgement;
+        row.human_label = data.human_label || '';
+        statusNode.textContent = `已反馈：${judgement === 'qualified' ? '结论合格' : '结论不合格'}；训练标签 ${row.human_label}`;
+      } catch (error) {
+        button.disabled = false;
+        if (peerButton) peerButton.disabled = false;
+        statusNode.textContent = `反馈失败：${String(error)}`;
+      }
+    }
+
+    function renderFeedbackReviews(job) {
+      const rows = job.feedback_reviews || [];
+      if (!rows.length || !(job.status === 'done' || job.status === 'failed' || job.status === 'terminated')) {
+        renderProblemReviews(job);
+        return;
+      }
+      const key = `${job.id || ''}:feedback:${rows.length}`;
+      if (shownProblemReviewKeys.has(key)) return;
+      shownProblemReviewKeys.add(key);
+      clearChildren(reviewModalBodyEl);
+      const intro = document.createElement('div');
+      intro.textContent = `本轮已从失败、待登录、内容不好放弃、主要内容来源、待核实线索和模型边界样本中分层抽样 ${rows.length} 条。请判断系统结论是否合格，点击后会写入本地训练数据；反馈完成后训练 .pt 模型。`;
+      reviewModalBodyEl.appendChild(intro);
+
+      const actions = document.createElement('div');
+      actions.className = 'login-review-actions';
+      const trainBtn = document.createElement('button');
+      trainBtn.type = 'button';
+      trainBtn.textContent = '反馈完成并训练模型';
+      trainBtn.addEventListener('click', () => trainModelFromUi(true, trainBtn));
+      actions.appendChild(trainBtn);
+      [['问题页面核验清单.csv', '下载问题核验表'], ['人工抽样标注表.csv', '下载抽样标注表']].forEach(([file, label]) => {
+        const link = document.createElement('a');
+        link.href = `/download?job=${encodeURIComponent(job.id)}&file=${encodeURIComponent(file)}`;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.textContent = label;
+        actions.appendChild(link);
+      });
+      reviewModalBodyEl.appendChild(actions);
+
+      rows.forEach((row, index) => {
+        const item = document.createElement('div');
+        item.className = 'review-item';
+        const title = document.createElement('strong');
+        title.textContent = `${index + 1}. ${row.feedback_category || '抽样核验'} · ${row.competitor || row.domain || ''}`;
+        const url = document.createElement('a');
+        url.href = row.url;
+        url.target = '_blank';
+        url.rel = 'noopener noreferrer';
+        url.textContent = row.title || row.url;
+        const conclusion = document.createElement('div');
+        conclusion.textContent = `系统结论：${row.model_conclusion || row.conclusion_label || '待判断'}`;
+        const reason = document.createElement('div');
+        reason.textContent = `依据：${row.reason || row.snippet || row.verification_reason || '无摘要'}`;
+        const status = document.createElement('div');
+        status.textContent = row.feedback_status === 'ready_for_training'
+          ? `已反馈：${row.feedback_judgement || ''}；训练标签 ${row.human_label || ''}`
+          : '等待人工评判';
+        const buttons = document.createElement('div');
+        buttons.className = 'login-review-buttons';
+        const goodBtn = document.createElement('button');
+        goodBtn.type = 'button';
+        goodBtn.textContent = '评判合格';
+        const badBtn = document.createElement('button');
+        badBtn.type = 'button';
+        badBtn.className = 'skip';
+        badBtn.textContent = '评判不合格';
+        if (row.feedback_status === 'ready_for_training') {
+          goodBtn.disabled = true;
+          badBtn.disabled = true;
+        }
+        goodBtn.addEventListener('click', () => {
+          badBtn.disabled = true;
+          sendFeedbackReview(job, row, 'qualified', goodBtn, status, badBtn);
+        });
+        badBtn.addEventListener('click', () => {
+          goodBtn.disabled = true;
+          sendFeedbackReview(job, row, 'unqualified', badBtn, status, goodBtn);
+        });
+        buttons.appendChild(goodBtn);
+        buttons.appendChild(badBtn);
+        item.appendChild(title);
+        item.appendChild(url);
+        item.appendChild(conclusion);
+        item.appendChild(reason);
+        item.appendChild(status);
+        item.appendChild(buttons);
+        reviewModalBodyEl.appendChild(item);
+      });
+      reviewModalEl.hidden = false;
+    }
+
     function renderJob(job) {
       currentJobId = job.id || currentJobId;
       statusEl.className = statusClass(job.status);
@@ -948,7 +1112,7 @@ INDEX_HTML = r"""<!doctype html>
       logsEl.textContent = (job.logs || []).join('');
       logsEl.scrollTop = logsEl.scrollHeight;
       renderLoginReviews(job);
-      renderProblemReviews(job);
+      renderFeedbackReviews(job);
       artifactsEl.innerHTML = '';
       const files = job.artifacts || [];
       files.forEach(file => {
@@ -1681,6 +1845,311 @@ def load_problem_reviews(out_dir: Path, limit: int = 50) -> List[dict]:
     return rows
 
 
+def compact_cell(value: Any) -> str:
+    if value is None:
+        return ""
+    return re.sub(r"\s+", " ", str(value)).strip()
+
+
+def read_csv_artifact_rows(out_dir: Path, names: Sequence[str], source_file_label: str = "") -> List[dict]:
+    rows: List[dict] = []
+    candidate_paths: List[Path] = []
+    seen_paths = set()
+    for name in names:
+        for path in artifact_candidate_paths(out_dir, name):
+            if path in seen_paths:
+                continue
+            seen_paths.add(path)
+            candidate_paths.append(path)
+    for path in candidate_paths:
+        if not path.exists():
+            continue
+        try:
+            with path.open("r", encoding="utf-8-sig", newline="") as handle:
+                for row in csv.DictReader(handle):
+                    normalized = {str(key): compact_cell(value) for key, value in row.items() if key is not None}
+                    normalized["source_file"] = source_file_label or path.name
+                    rows.append(normalized)
+        except OSError:
+            continue
+        if rows:
+            break
+    return rows
+
+
+def feedback_row_url(row: Mapping[str, Any]) -> str:
+    return compact_cell(row.get("url") or row.get("login_assist_url") or row.get("url_or_path") or row.get("gui_review_url"))
+
+
+def feedback_row_domain(row: Mapping[str, Any]) -> str:
+    explicit = compact_cell(row.get("domain"))
+    if explicit:
+        return explicit.lower().removeprefix("www.")
+    return (urlparse(feedback_row_url(row)).netloc or "").lower().removeprefix("www.")
+
+
+def feedback_category_for_row(row: Mapping[str, Any]) -> str:
+    problem_type = compact_cell(row.get("problem_type"))
+    status = compact_cell(row.get("status") or row.get("automated_review_status") or row.get("decision_status"))
+    hard_gate = compact_cell(row.get("hard_gate"))
+    source_policy = compact_cell(row.get("source_policy_tier"))
+    source_kind = compact_cell(row.get("source_kind"))
+    pending = compact_cell(row.get("pending_verification")).lower()
+    page_role = compact_cell(row.get("page_role"))
+    haystack = " ".join([problem_type, status, hard_gate, source_policy, source_kind, page_role, compact_cell(row.get("reason"))]).lower()
+    if "登录" in problem_type or "login" in haystack or page_role == "auth_or_account_shell":
+        return "待登录"
+    if any(token in haystack for token in ("403", "cloudflare", "captcha", "datadome", "反爬", "超时", "timeout", "404", "minimal_text", "正文不足", "js 空壳")):
+        return "失败/反爬/超时"
+    if status.lower() == "rejected" or hard_gate.startswith("rejected") or source_policy.lower().startswith("reject"):
+        return "内容不好放弃"
+    if source_policy.startswith("P0") or compact_cell(row.get("primary_evidence_candidate")).lower() == "yes" or (
+        status.lower() in {"selected", "accepted"} and "official" in source_kind.lower()
+    ):
+        return "主要内容来源"
+    if pending == "yes" or "待核实" in haystack or "verify" in haystack:
+        return "待核实线索"
+    include_score = feedback_score(row.get("ml_include_score"))
+    exclude_score = feedback_score(row.get("ml_exclude_score"))
+    verify_score = feedback_score(row.get("ml_verify_later_score"))
+    scored = [score for score in (include_score, exclude_score, verify_score) if score > 0]
+    confidence = compact_cell(row.get("ml_confidence")).lower()
+    if confidence in {"low", "medium"} or (len(scored) >= 2 and max(scored) - sorted(scored)[-2] <= 0.25):
+        return "模型边界样本"
+    return ""
+
+
+def feedback_score(value: Any) -> float:
+    try:
+        return float(compact_cell(value) or 0)
+    except ValueError:
+        return 0.0
+
+
+def feedback_conclusion_label(row: Mapping[str, Any], category: str) -> str:
+    label = normalize_label(row.get("suggested_human_label") or row.get("suggested_label") or row.get("ml_label"))
+    if label:
+        return label
+    if category == "主要内容来源":
+        return "include"
+    if category == "内容不好放弃":
+        return "exclude"
+    if category == "失败/反爬/超时" and "404" in compact_cell(row.get("problem_type")):
+        return "exclude"
+    return "verify_later"
+
+
+def feedback_counter_label(label: str, category: str) -> str:
+    if label == "include":
+        return "exclude"
+    if label == "exclude":
+        return "verify_later"
+    if category == "主要内容来源":
+        return "exclude"
+    return "exclude"
+
+
+def feedback_model_conclusion(label: str, category: str) -> str:
+    if label == "include":
+        return f"{category}：建议收录，可作为竞品分析证据。"
+    if label == "exclude":
+        return f"{category}：建议放弃，不进入本轮分析。"
+    return f"{category}：建议待核实，补证后再决定是否入库。"
+
+
+def build_feedback_card(row: Mapping[str, Any], category: str, job_id: str, feedback_status: Mapping[Tuple[str, str, str], Mapping[str, Any]]) -> dict:
+    url = feedback_row_url(row)
+    label = feedback_conclusion_label(row, category)
+    key = (compact_cell(row.get("competitor")), url, category)
+    prior = feedback_status.get(key, {})
+    return {
+        "source_job_id": job_id,
+        "feedback_category": category,
+        "competitor": compact_cell(row.get("competitor")),
+        "title": compact_cell(row.get("title")),
+        "url": url,
+        "domain": feedback_row_domain(row),
+        "snippet": compact_cell(row.get("snippet") or row.get("content_preview") or row.get("text_snapshot_excerpt")),
+        "reason": compact_cell(row.get("reason") or row.get("verification_reason") or row.get("what_to_verify")),
+        "model_conclusion": feedback_model_conclusion(label, category),
+        "conclusion_label": label,
+        "counter_human_label": feedback_counter_label(label, category),
+        "source_file": compact_cell(row.get("source_file")),
+        "source_queue": compact_cell(row.get("source_queue")),
+        "problem_type": compact_cell(row.get("problem_type")),
+        "decision_status": compact_cell(row.get("decision_status")),
+        "hard_gate": compact_cell(row.get("hard_gate")),
+        "source_kind": compact_cell(row.get("source_kind")),
+        "page_role": compact_cell(row.get("page_role")),
+        "source_policy_tier": compact_cell(row.get("source_policy_tier")),
+        "pending_verification": compact_cell(row.get("pending_verification")),
+        "verification_reason": compact_cell(row.get("verification_reason")),
+        "fact_type": compact_cell(row.get("fact_type")),
+        "increment_type": compact_cell(row.get("increment_type")),
+        "fact_group": compact_cell(row.get("fact_group")),
+        "ml_confidence": compact_cell(row.get("ml_confidence")),
+        "ml_include_score": compact_cell(row.get("ml_include_score")),
+        "ml_exclude_score": compact_cell(row.get("ml_exclude_score")),
+        "ml_verify_later_score": compact_cell(row.get("ml_verify_later_score")),
+        "feedback_judgement": compact_cell(prior.get("feedback_judgement")),
+        "human_label": compact_cell(prior.get("human_label")),
+        "human_reason": compact_cell(prior.get("human_reason")),
+        "feedback_status": compact_cell(prior.get("feedback_status")) or "pending",
+        "reviewed_at": compact_cell(prior.get("reviewed_at")),
+    }
+
+
+def read_feedback_status(out_dir: Path) -> Dict[Tuple[str, str, str], dict]:
+    rows = read_csv_artifact_rows(out_dir, ["人工反馈标注.csv", "human_feedback_labels.csv"], "人工反馈标注.csv")
+    status: Dict[Tuple[str, str, str], dict] = {}
+    for row in rows:
+        key = (compact_cell(row.get("competitor")), feedback_row_url(row), compact_cell(row.get("feedback_category")))
+        if key[1] and key[2]:
+            status[key] = row
+    return status
+
+
+def build_feedback_review_samples(out_dir: Path, per_category: int = 3) -> List[dict]:
+    out_dir = Path(out_dir)
+    source_rows: List[dict] = []
+    source_rows.extend(read_csv_artifact_rows(out_dir, ["问题页面核验清单.csv", "problem_pages_review.csv"], "问题页面核验清单.csv"))
+    source_rows.extend(read_csv_artifact_rows(out_dir, ["人工抽样标注表.csv", "training_review_sample.csv"], "人工抽样标注表.csv"))
+    source_rows.extend(read_csv_artifact_rows(out_dir, ["evidence_audit.csv", "证据筛选审计.csv"], "evidence_audit.csv"))
+    feedback_status = read_feedback_status(out_dir)
+    by_category: Dict[str, List[dict]] = {category: [] for category in FEEDBACK_CATEGORY_ORDER}
+    seen_source_keys = set()
+    for row in source_rows:
+        category = feedback_category_for_row(row)
+        url = feedback_row_url(row)
+        if not category or not url:
+            continue
+        key = (category, compact_cell(row.get("competitor")), url)
+        if key in seen_source_keys:
+            continue
+        seen_source_keys.add(key)
+        by_category.setdefault(category, []).append(row)
+
+    samples: List[dict] = []
+    used_urls = set()
+    job_id = out_dir.name
+    for category in FEEDBACK_CATEGORY_ORDER:
+        candidates = by_category.get(category, [])
+        seed = int(hashlib.sha1(f"{job_id}:{category}:{len(candidates)}".encode("utf-8")).hexdigest()[:10], 16)
+        shuffled = list(candidates)
+        random.Random(seed).shuffle(shuffled)
+        picked = 0
+        for row in shuffled:
+            url = feedback_row_url(row)
+            if url in used_urls:
+                continue
+            samples.append(build_feedback_card(row, category, job_id, feedback_status))
+            used_urls.add(url)
+            picked += 1
+            if picked >= max(0, per_category):
+                break
+    return samples
+
+
+def merge_csv_fields(existing_fields: Sequence[str], preferred_fields: Sequence[str], row: Mapping[str, Any]) -> List[str]:
+    fields: List[str] = []
+    for field in [*preferred_fields, *existing_fields, *[str(key) for key in row.keys()]]:
+        if field and field not in fields:
+            fields.append(field)
+    return fields
+
+
+def upsert_csv_row(path: Path, row: Mapping[str, Any], preferred_fields: Sequence[str], key_fields: Sequence[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing_rows: List[dict] = []
+    existing_fields: List[str] = []
+    if path.exists():
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            existing_fields = list(reader.fieldnames or [])
+            existing_rows = [dict(item) for item in reader]
+    normalized_row = {str(key): compact_cell(value) for key, value in row.items()}
+    fields = merge_csv_fields(existing_fields, preferred_fields, normalized_row)
+
+    def row_key(item: Mapping[str, Any]) -> Tuple[str, ...]:
+        return tuple(compact_cell(item.get(field)) for field in key_fields)
+
+    target_key = row_key(normalized_row)
+    replaced = False
+    next_rows: List[dict] = []
+    for existing in existing_rows:
+        if row_key(existing) == target_key:
+            next_rows.append({**existing, **normalized_row})
+            replaced = True
+        else:
+            next_rows.append(existing)
+    if not replaced:
+        next_rows.append(normalized_row)
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        for item in next_rows:
+            writer.writerow(item)
+
+
+def feedback_payload_judgement(value: str) -> str:
+    normalized = compact_cell(value).lower()
+    if normalized in {"qualified", "good", "pass", "合格", "正确"}:
+        return "qualified"
+    if normalized in {"unqualified", "bad", "fail", "不合格", "错误"}:
+        return "unqualified"
+    raise ValueError("judgement must be qualified or unqualified")
+
+
+def record_feedback_review(payload: Mapping[str, Any]) -> dict:
+    job_id = compact_cell(payload.get("job") or payload.get("job_id"))
+    out_dir = safe_job_dir(job_id)
+    if not out_dir:
+        raise ValueError("job not found")
+    url = compact_cell(payload.get("url"))
+    competitor = compact_cell(payload.get("competitor"))
+    category = compact_cell(payload.get("feedback_category"))
+    judgement = feedback_payload_judgement(compact_cell(payload.get("judgement")))
+    samples = build_feedback_review_samples(out_dir, per_category=10)
+    match = None
+    for row in samples:
+        if feedback_row_url(row) != url:
+            continue
+        if competitor and compact_cell(row.get("competitor")) != competitor:
+            continue
+        if category and compact_cell(row.get("feedback_category")) != category:
+            continue
+        match = row
+        break
+    if not match:
+        raise ValueError("feedback sample not found")
+    human_label = match["conclusion_label"] if judgement == "qualified" else match["counter_human_label"]
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    feedback_text = "结论合格" if judgement == "qualified" else "结论不合格"
+    row = {
+        **match,
+        "source_job_id": job_id,
+        "feedback_judgement": judgement,
+        "human_label": human_label,
+        "human_reason": f"{feedback_text}：{match.get('model_conclusion')}",
+        "feedback_status": "ready_for_training",
+        "reviewed_at": now,
+    }
+    key_fields = ["source_job_id", "feedback_category", "competitor", "url"]
+    upsert_csv_row(out_dir / "人工反馈标注.csv", row, FEEDBACK_REVIEW_FIELDS, key_fields)
+    upsert_csv_row(out_dir / "human_feedback_labels.csv", row, FEEDBACK_REVIEW_FIELDS, key_fields)
+    upsert_csv_row(DEFAULT_REVIEW_LABELS_PATH, row, FEEDBACK_REVIEW_FIELDS, key_fields)
+    return {
+        "ok": True,
+        "job": job_id,
+        "feedback_category": row["feedback_category"],
+        "url": row["url"],
+        "judgement": judgement,
+        "human_label": human_label,
+        "review_labels_path": str(DEFAULT_REVIEW_LABELS_PATH),
+        "job_feedback_path": str(out_dir / "人工反馈标注.csv"),
+    }
+
+
 def write_timing_artifacts(job: Job) -> None:
     timing = job_timing_snapshot(job)
     record = {
@@ -1772,6 +2241,7 @@ def job_snapshot(job: Job, now: Optional[float] = None) -> dict:
         "artifacts": artifacts,
         "login_required_reviews": load_login_required_reviews(job.out_dir),
         "problem_reviews": load_problem_reviews(job.out_dir),
+        "feedback_reviews": build_feedback_review_samples(job.out_dir) if job.status in {"done", "failed", "terminated"} else [],
     }
     snapshot.update(job_timing_snapshot(job, now=now))
     return snapshot
@@ -1916,6 +2386,7 @@ def disk_job_snapshot(job_id: str) -> Optional[dict]:
         "artifacts": artifacts,
         "login_required_reviews": load_login_required_reviews(out_dir),
         "problem_reviews": load_problem_reviews(out_dir),
+        "feedback_reviews": build_feedback_review_samples(out_dir) if status in {"done", "failed", "terminated"} else [],
         "restored_from_disk": True,
     }
 
@@ -2027,6 +2498,7 @@ def train_local_filter_model(payload: dict) -> dict:
             job_dir = latest_job_dir_with_training_reviews()
         if job_dir:
             for candidate_names in (
+                ("人工反馈标注.csv", "human_feedback_labels.csv"),
                 ("人工抽样标注表.csv", "training_review_sample.csv"),
                 ("问题页面核验清单.csv", "problem_pages_review.csv"),
             ):
@@ -2581,6 +3053,13 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 payload = json.loads(body or "{}")
                 json_response(self, train_local_filter_model(payload), HTTPStatus.CREATED)
+            except Exception as exc:
+                json_response(self, {"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if parsed.path == "/api/review/feedback":
+            try:
+                payload = json.loads(body or "{}")
+                json_response(self, record_feedback_review(payload), HTTPStatus.CREATED)
             except Exception as exc:
                 json_response(self, {"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return

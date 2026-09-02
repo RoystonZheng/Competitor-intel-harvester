@@ -1,3 +1,4 @@
+import csv
 import tempfile
 import unittest
 from pathlib import Path
@@ -286,6 +287,113 @@ class JobTimingTest(unittest.TestCase):
         self.assertIn("currentJobId = job.id || currentJobId;", app.INDEX_HTML)
         self.assertIn("finally", app.INDEX_HTML)
         self.assertIn("triggerButton.disabled = false", app.INDEX_HTML)
+
+    def test_feedback_review_samples_are_stratified_for_click_judgement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            (out_dir / "问题页面核验清单.csv").write_text(
+                "competitor,priority,problem_type,source_queue,title,url,domain,status,source_kind,page_role,source_policy_tier,pending_verification,verification_reason,fact_type,increment_type,fact_group,reason,what_to_verify,data_entry_decision,suggested_human_label,human_label,human_reason\n"
+                "Demo,P1,HTTP 403 / 反爬拦截,crawl4ai_page,Demo blocked,https://demo.example/blocked,demo.example,403,official_core,pricing_packaging,P0 官方核心来源,yes,blocked,pricing,pricing,,blocked,核验403,补证,verify_later,,\n"
+                "Demo,P0-LOGIN,需登录/注册/账号权限,login_required_queue,Demo login,https://demo.example/login,demo.example,requires_user_login,official_core,auth_or_account_shell,Reject 登录/交易壳,yes,login,account,,,login,核验登录,登录后补证,verify_later,,\n",
+                encoding="utf-8-sig",
+            )
+            (out_dir / "人工抽样标注表.csv").write_text(
+                "competitor,title,url,domain,snippet,source_kind,page_role,source_policy_tier,decision_status,hard_gate,pending_verification,verification_reason,ml_confidence,ml_include_score,ml_exclude_score,suggested_label,human_label,human_reason\n"
+                "Demo,Demo pricing,https://demo.example/pricing,demo.example,Official pricing tiers,official_core,pricing_packaging,P0 官方核心来源,selected,,no,,high,0.91,0.03,include,,\n"
+                "Demo,Demo junk,https://spam.example/demo,spam.example,Download cracked app,low_value_or_aggregator,low_value_or_aggregator,Reject 低价值聚合,rejected,rejected_low_value,no,,high,0.02,0.95,exclude,,\n"
+                "Demo,Demo forum,https://forum.example/demo,forum.example,Unverified rumor,community_or_social_signal,forum_or_community_discussion,P2 社区线索,signal,,yes,needs source,low,0.40,0.30,verify_later,,\n",
+                encoding="utf-8-sig",
+            )
+
+            rows = app.build_feedback_review_samples(out_dir, per_category=1)
+
+        categories = {row["feedback_category"] for row in rows}
+        self.assertIn("失败/反爬/超时", categories)
+        self.assertIn("待登录", categories)
+        self.assertIn("内容不好放弃", categories)
+        self.assertIn("主要内容来源", categories)
+        self.assertIn("待核实线索", categories)
+        for row in rows:
+            self.assertTrue(row["model_conclusion"])
+            self.assertIn(row["conclusion_label"], {"include", "exclude", "verify_later"})
+            self.assertIn(row["counter_human_label"], {"include", "exclude", "verify_later"})
+            self.assertEqual(row["feedback_status"], "pending")
+
+    def test_feedback_review_click_writes_training_label(self):
+        original_runs_dir = app.RUNS_DIR
+        original_review_labels = app.DEFAULT_REVIEW_LABELS_PATH
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app.RUNS_DIR = root / "runs"
+            app.DEFAULT_REVIEW_LABELS_PATH = root / "training_data" / "review_labels.csv"
+            job_id = "20260831-120000-abcdef"
+            job_dir = app.RUNS_DIR / job_id
+            job_dir.mkdir(parents=True)
+            (job_dir / "人工抽样标注表.csv").write_text(
+                "competitor,title,url,domain,snippet,source_kind,page_role,source_policy_tier,decision_status,hard_gate,pending_verification,verification_reason,ml_confidence,ml_include_score,ml_exclude_score,suggested_label,human_label,human_reason\n"
+                "Demo,Demo pricing,https://demo.example/pricing,demo.example,Official pricing tiers,official_core,pricing_packaging,P0 官方核心来源,selected,,no,,high,0.91,0.03,include,,\n"
+                "Demo,Demo junk,https://spam.example/demo,spam.example,Download cracked app,low_value_or_aggregator,low_value_or_aggregator,Reject 低价值聚合,rejected,rejected_low_value,no,,high,0.02,0.95,exclude,,\n",
+                encoding="utf-8-sig",
+            )
+
+            try:
+                qualified = app.record_feedback_review(
+                    {
+                        "job": job_id,
+                        "competitor": "Demo",
+                        "url": "https://demo.example/pricing",
+                        "feedback_category": "主要内容来源",
+                        "judgement": "qualified",
+                    }
+                )
+                unqualified = app.record_feedback_review(
+                    {
+                        "job": job_id,
+                        "competitor": "Demo",
+                        "url": "https://spam.example/demo",
+                        "feedback_category": "内容不好放弃",
+                        "judgement": "unqualified",
+                    }
+                )
+                with app.DEFAULT_REVIEW_LABELS_PATH.open("r", encoding="utf-8-sig", newline="") as handle:
+                    label_rows = list(csv.DictReader(handle))
+                with (job_dir / "人工反馈标注.csv").open("r", encoding="utf-8-sig", newline="") as handle:
+                    job_rows = list(csv.DictReader(handle))
+                empty_labels = root / "empty_labels.csv"
+                empty_labels.write_text(
+                    "competitor,title,url,snippet,human_label,human_reason\n",
+                    encoding="utf-8",
+                )
+                train_report = app.train_local_filter_model(
+                    {
+                        "labels_path": str(empty_labels),
+                        "model_out": str(root / "models" / "filter_model.pt"),
+                        "cards_dir": str(root / "search_cards"),
+                        "min_labeled_rows": 2,
+                        "job_id": job_id,
+                        "include_problem_reviews": True,
+                    }
+                )
+            finally:
+                app.RUNS_DIR = original_runs_dir
+                app.DEFAULT_REVIEW_LABELS_PATH = original_review_labels
+
+        self.assertEqual(qualified["human_label"], "include")
+        self.assertEqual(unqualified["human_label"], "verify_later")
+        self.assertEqual(len(label_rows), 2)
+        self.assertEqual(label_rows[0]["feedback_judgement"], "qualified")
+        self.assertEqual(label_rows[1]["feedback_judgement"], "unqualified")
+        self.assertEqual(len(job_rows), 2)
+        self.assertEqual(train_report["training_rows"], 2)
+        self.assertIn(str((job_dir / "人工反馈标注.csv").resolve()), train_report["label_paths"])
+
+    def test_feedback_review_ui_uses_click_judgement_buttons(self):
+        self.assertIn("renderFeedbackReviews(job)", app.INDEX_HTML)
+        self.assertIn("评判合格", app.INDEX_HTML)
+        self.assertIn("评判不合格", app.INDEX_HTML)
+        self.assertIn("/api/review/feedback", app.INDEX_HTML)
+        self.assertIn("feedback_reviews", app.INDEX_HTML)
+        self.assertIn("peerButton.disabled = false", app.INDEX_HTML)
 
     def test_model_status_for_ui_bootstraps_default_model_when_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
