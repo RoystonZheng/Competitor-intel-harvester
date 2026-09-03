@@ -1,4 +1,5 @@
 import csv
+import threading
 import tempfile
 import unittest
 from pathlib import Path
@@ -162,6 +163,43 @@ class JobTimingTest(unittest.TestCase):
                 self.assertEqual(first["domain"], "demo.example")
             finally:
                 app.RUNS_DIR = original_runs_dir
+
+    def test_record_login_open_request_starts_post_run_capture_for_disk_job(self):
+        original_runs_dir = app.RUNS_DIR
+        original_runner = app.POST_RUN_LOGIN_CAPTURE_RUNNER
+        finished = threading.Event()
+        calls = []
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app.RUNS_DIR = root / "runs"
+            job_id = "20260831-120000-abcdef"
+            job_dir = app.RUNS_DIR / job_id
+            job_dir.mkdir(parents=True)
+            (job_dir / "竞品分析报告_图片内嵌版.md").write_text("# done\n", encoding="utf-8")
+            queue = job_dir / "需登录队列.csv"
+            queue.write_text(
+                "competitor,domain,title,url,login_assist_url,queued_urls,requires_user_login,review_reason,automated_review_status,next_step\n"
+                "Atomic S9 FIS,douyin.com,ATOMIC S9FIS 到货 #滑雪,https://www.douyin.com/,https://www.douyin.com/,https://www.douyin.com/video/7170289680624192775,yes,platform_login_assist_user_action,requires_user_login,请点击登录池后继续\n",
+                encoding="utf-8-sig",
+            )
+
+            def fake_runner(*args):
+                calls.append(args)
+                finished.set()
+
+            app.POST_RUN_LOGIN_CAPTURE_RUNNER = fake_runner
+            try:
+                result = app.record_login_open_request(job_id, "Atomic S9 FIS", "https://www.douyin.com/")
+                self.assertTrue(finished.wait(1.0))
+            finally:
+                app.RUNS_DIR = original_runs_dir
+                app.POST_RUN_LOGIN_CAPTURE_RUNNER = original_runner
+                app.POST_RUN_LOGIN_CAPTURE_THREADS.clear()
+
+        self.assertFalse(result["active_job_consumer"])
+        self.assertTrue(result["post_run_capture"]["started"])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls[0][3]), 1)
 
     def test_login_pool_module_stays_visible_for_active_jobs(self):
         self.assertIn("登录等待池", app.INDEX_HTML)

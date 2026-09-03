@@ -107,6 +107,8 @@ class Job:
 
 JOBS: Dict[str, Job] = {}
 JOBS_LOCK = threading.Lock()
+POST_RUN_LOGIN_CAPTURE_LOCK = threading.Lock()
+POST_RUN_LOGIN_CAPTURE_THREADS: Dict[Tuple[str, str], threading.Thread] = {}
 
 PRIMARY_ARTIFACTS = [
     "实验计时记录.md",
@@ -850,7 +852,17 @@ INDEX_HTML = r"""<!doctype html>
         statusNode.textContent = `操作失败：${data.error || data.message || action}`;
         return;
       }
-      statusNode.textContent = action === 'skip' ? '已跳过' : '已请求登录，等待工具浏览器接管';
+      if (action === 'skip') {
+        statusNode.textContent = '已跳过';
+      } else if (data.active_job_consumer) {
+        statusNode.textContent = '已请求登录，等待采集进程打开工具浏览器';
+      } else if (data.post_run_capture && data.post_run_capture.started) {
+        statusNode.textContent = '已启动登录辅助，请在弹出的工具浏览器登录';
+      } else if (data.post_run_capture && data.post_run_capture.reason) {
+        statusNode.textContent = `已记录请求：${data.post_run_capture.reason}`;
+      } else {
+        statusNode.textContent = '已请求登录';
+      }
       fetchJob();
     }
 
@@ -911,7 +923,11 @@ INDEX_HTML = r"""<!doctype html>
         const detail = document.createElement('span');
         detail.textContent = row.title || url || '无标题';
         const state = document.createElement('span');
-        state.textContent = row.login_click_requested === 'yes' ? '已请求登录，等待工具浏览器读取登录态' : '等待操作';
+        const terminalJob = ['done', 'failed', 'terminated'].includes(job.status);
+        const retryableClick = row.login_click_requested === 'yes' && terminalJob;
+        state.textContent = row.login_click_requested === 'yes'
+          ? (retryableClick ? '已请求过，可重新打开登录辅助' : '已请求登录，等待工具浏览器读取登录态')
+          : '等待操作';
         meta.appendChild(label);
         meta.appendChild(detail);
         meta.appendChild(state);
@@ -920,8 +936,8 @@ INDEX_HTML = r"""<!doctype html>
         buttons.className = 'login-review-buttons';
         const openBtn = document.createElement('button');
         openBtn.type = 'button';
-        openBtn.textContent = row.login_click_requested === 'yes' ? '已请求登录' : '登录并继续';
-        openBtn.disabled = row.login_click_requested === 'yes';
+        openBtn.textContent = retryableClick ? '重新打开' : (row.login_click_requested === 'yes' ? '已请求登录' : '登录并继续');
+        openBtn.disabled = row.login_click_requested === 'yes' && !retryableClick;
         openBtn.addEventListener('click', () => sendLoginRequest(job, row, 'open', openBtn, state));
         const skipBtn = document.createElement('button');
         skipBtn.type = 'button';
@@ -2414,6 +2430,131 @@ def login_request_marker_exists(out_dir: Path, competitor: str, url: str, kind: 
     return login_request_marker_path(out_dir, competitor, url, kind).exists()
 
 
+def active_job_consumes_login_requests(job_id: str) -> bool:
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return False
+        return job.status in {"queued", "running", "paused", "stopping"} and job.finished_at is None
+
+
+def login_rows_for_request(out_dir: Path, competitor: str, url: str) -> List[dict]:
+    target_key = login_pool_key_for_values(competitor, url)
+    rows = []
+    for row in load_login_required_reviews(out_dir, limit=1000):
+        row_url = row.get("login_assist_url") or row.get("url") or ""
+        if login_pool_key_for_values(row.get("competitor") or "", row_url) == target_key:
+            rows.append(row)
+    return rows
+
+
+def append_post_run_login_log(out_dir: Path, message: str) -> None:
+    timestamp = format_local_time(time.time())
+    try:
+        with (out_dir / "post_run_login_capture.log").open("a", encoding="utf-8") as handle:
+            handle.write(f"[{timestamp}] {message}\n")
+    except OSError:
+        pass
+
+
+def merge_gui_review_rows(existing_rows: Sequence[Mapping[str, Any]], new_rows: Sequence[Mapping[str, Any]]) -> List[dict]:
+    merged: Dict[Tuple[str, str, str], dict] = {}
+    for row in list(existing_rows) + list(new_rows):
+        url = str(row.get("url") or row.get("login_assist_url") or "").strip()
+        competitor = str(row.get("competitor") or "").strip()
+        status = str(row.get("automated_review_status") or "").strip()
+        if not url and not competitor:
+            continue
+        merged[(competitor, url, status)] = dict(row)
+    return list(merged.values())
+
+
+def post_run_login_capture_runner(
+    job_id: str,
+    capture_id: str,
+    out_dir: Path,
+    requested_rows: Sequence[Mapping[str, Any]],
+    all_login_rows: Sequence[Mapping[str, Any]],
+    wait_seconds: int = 120,
+    proxy_url: str = "",
+) -> None:
+    append_post_run_login_log(out_dir, f"started job={job_id} rows={len(requested_rows)}")
+    try:
+        from competitor_harvester import (
+            GUI_REVIEW_FIELDS,
+            LOGIN_REQUIRED_FIELDS,
+            LoginAssistSession,
+            login_required_queue_rows,
+            write_csv,
+            write_gui_review_results_markdown,
+            write_login_required_queue,
+        )
+
+        existing_gui_rows = read_csv_artifact_rows(
+            out_dir,
+            ["GUI自动复核结果.csv", "gui_review_results.csv"],
+            "GUI自动复核结果.csv",
+        )
+        session = LoginAssistSession(out_dir, proxy_url=proxy_url)
+        try:
+            session.add_rows(requested_rows)
+            new_gui_rows = session.capture_all(wait_seconds=wait_seconds)
+        finally:
+            session.close()
+
+        gui_rows = merge_gui_review_rows(existing_gui_rows, new_gui_rows)
+        internal_dir = out_dir / INTERNAL_OUTPUT_DIR_NAME
+        internal_dir.mkdir(parents=True, exist_ok=True)
+        write_csv(out_dir / "GUI自动复核结果.csv", gui_rows, GUI_REVIEW_FIELDS)
+        write_csv(internal_dir / "gui_review_results.csv", gui_rows, GUI_REVIEW_FIELDS)
+        write_gui_review_results_markdown(out_dir / "GUI自动复核结果.md", gui_rows)
+        write_gui_review_results_markdown(internal_dir / "gui_review_results.md", gui_rows)
+
+        remaining_rows = login_required_queue_rows(all_login_rows, gui_rows)
+        write_csv(out_dir / "需登录队列.csv", remaining_rows, LOGIN_REQUIRED_FIELDS)
+        write_csv(internal_dir / "login_required_queue.csv", remaining_rows, LOGIN_REQUIRED_FIELDS)
+        write_login_required_queue(out_dir / "需登录队列.md", remaining_rows)
+        write_login_required_queue(internal_dir / "login_required_queue.md", remaining_rows)
+        append_post_run_login_log(
+            out_dir,
+            f"finished captured={len(new_gui_rows)} remaining_login_rows={len(remaining_rows)}",
+        )
+    except Exception as exc:
+        append_post_run_login_log(out_dir, f"failed: {exc}")
+    finally:
+        with POST_RUN_LOGIN_CAPTURE_LOCK:
+            POST_RUN_LOGIN_CAPTURE_THREADS.pop((job_id, capture_id), None)
+
+
+POST_RUN_LOGIN_CAPTURE_RUNNER = post_run_login_capture_runner
+
+
+def start_post_run_login_capture(job_id: str, out_dir: Path, competitor: str, url: str) -> dict:
+    requested_rows = login_rows_for_request(out_dir, competitor, url)
+    if not requested_rows:
+        return {"started": False, "mode": "post_run", "reason": "login row not found"}
+    all_login_rows = load_login_required_reviews(out_dir, limit=1000)
+    capture_id = login_click_marker_id(competitor, url)
+    key = (job_id, capture_id)
+    with POST_RUN_LOGIN_CAPTURE_LOCK:
+        thread = POST_RUN_LOGIN_CAPTURE_THREADS.get(key)
+        if thread and thread.is_alive():
+            return {"started": False, "mode": "post_run", "reason": "capture already running"}
+        thread = threading.Thread(
+            target=POST_RUN_LOGIN_CAPTURE_RUNNER,
+            args=(job_id, capture_id, out_dir, requested_rows, all_login_rows),
+            daemon=True,
+        )
+        POST_RUN_LOGIN_CAPTURE_THREADS[key] = thread
+        thread.start()
+    return {
+        "started": True,
+        "mode": "post_run",
+        "requested_rows": len(requested_rows),
+        "queued_url_count": sum(int(row.get("queued_url_count") or 1) for row in requested_rows),
+    }
+
+
 def record_login_request(job_id: str, competitor: str, url: str, kind: str) -> dict:
     out_dir = safe_job_dir(job_id)
     if not out_dir:
@@ -2430,12 +2571,17 @@ def record_login_request(job_id: str, competitor: str, url: str, kind: str) -> d
         "job_id": job_id,
         "competitor": competitor,
         "url": url,
-        "domain": login_pool_site_domain(url) or (urlparse(url).netloc or "").lower().removeprefix("www."),
+        "domain": login_pool_platform_key_for_url_or_domain(url)
+        or login_pool_site_domain(url)
+        or (urlparse(url).netloc or "").lower().removeprefix("www."),
         "action": kind,
         "requested_at": clicked_at,
         "requested_at_label": format_local_time(clicked_at),
     }
     marker_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    payload["active_job_consumer"] = active_job_consumes_login_requests(job_id)
+    if kind == "click" and not payload["active_job_consumer"]:
+        payload["post_run_capture"] = start_post_run_login_capture(job_id, out_dir, competitor, url)
     return {**payload, "marker_path": str(marker_path)}
 
 
