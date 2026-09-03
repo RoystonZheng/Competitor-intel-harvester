@@ -1644,6 +1644,25 @@ LOGIN_POOL_MULTI_LABEL_SUFFIXES = {
 
 LOGIN_POOL_RESERVED_TEST_SUFFIXES = {"example.com", "example.net", "example.org"}
 
+LOGIN_POOL_PLATFORM_TARGETS = {
+    "douyin.com": {"aliases": {"douyin.com", "www.douyin.com"}},
+    "xiaohongshu.com": {"aliases": {"xiaohongshu.com", "www.xiaohongshu.com", "xhslink.com"}},
+    "tiktok.com": {"aliases": {"tiktok.com", "www.tiktok.com"}},
+    "instagram.com": {"aliases": {"instagram.com", "www.instagram.com"}},
+    "x.com": {"aliases": {"x.com", "www.x.com"}},
+    "twitter.com": {"aliases": {"twitter.com", "www.twitter.com", "mobile.twitter.com"}},
+    "zhihu.com": {"aliases": {"zhihu.com", "www.zhihu.com", "zhuanlan.zhihu.com"}},
+    "reddit.com": {"aliases": {"reddit.com", "www.reddit.com", "old.reddit.com"}},
+    "bilibili.com": {"aliases": {"bilibili.com", "www.bilibili.com", "m.bilibili.com", "b23.tv"}},
+    "weixin.qq.com": {"aliases": {"mp.weixin.qq.com", "weixin.qq.com", "channels.weixin.qq.com", "web.wechat.com"}},
+}
+
+LOGIN_POOL_PLATFORM_ALIASES = {
+    alias.lower().removeprefix("www."): canonical
+    for canonical, config in LOGIN_POOL_PLATFORM_TARGETS.items()
+    for alias in config["aliases"]
+}
+
 
 def canonical_url_for_app_dedupe(url: str) -> str:
     raw = (url or "").strip()
@@ -1671,13 +1690,32 @@ def login_pool_site_domain(url: str) -> str:
     return ".".join(labels[-2:])
 
 
+def login_pool_platform_key_for_url_or_domain(value: str) -> str:
+    raw = (value or "").strip().lower()
+    if not raw:
+        return ""
+    candidate = raw if "://" in raw else f"https://{raw.lstrip('*.')}"
+    host = (urlparse(candidate).hostname or "").lower().strip(".")
+    if not host:
+        return ""
+    normalized_host = host.removeprefix("www.")
+    if normalized_host in LOGIN_POOL_PLATFORM_ALIASES:
+        return LOGIN_POOL_PLATFORM_ALIASES[normalized_host]
+    domain = login_pool_site_domain(f"https://{host}")
+    if domain in LOGIN_POOL_PLATFORM_ALIASES:
+        return LOGIN_POOL_PLATFORM_ALIASES[domain]
+    if domain in LOGIN_POOL_PLATFORM_TARGETS:
+        return domain
+    return ""
+
+
 def normalize_login_pool_keyword(value: str) -> str:
     normalized = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", (value or "").lower()).strip()
     return re.sub(r"\s+", " ", normalized)
 
 
 def login_pool_key_for_values(competitor: str, url: str) -> Tuple[str, str]:
-    site_domain = login_pool_site_domain(url)
+    site_domain = login_pool_platform_key_for_url_or_domain(url) or login_pool_site_domain(url)
     stable_target = site_domain or canonical_url_for_app_dedupe(url) or url
     return normalize_login_pool_keyword(competitor), stable_target.strip().lower()
 
@@ -1823,19 +1861,29 @@ def load_login_required_reviews(out_dir: Path, limit: int = 200) -> List[dict]:
                         continue
                     url = row.get("login_assist_url") or row.get("url") or row.get("gui_review_url") or ""
                     competitor = row.get("competitor") or ""
-                    domain = login_pool_site_domain(url) or (row.get("domain") or (urlparse(url).netloc or "").lower().removeprefix("www."))
+                    domain = (
+                        login_pool_platform_key_for_url_or_domain(url)
+                        or login_pool_site_domain(url)
+                        or (row.get("domain") or (urlparse(url).netloc or "").lower().removeprefix("www."))
+                    )
                     key = login_pool_key_for_values(competitor, url)
                     if not url or not key[1]:
                         continue
                     if login_request_marker_exists(out_dir, competitor, url, "skip"):
                         continue
-                    if not login_row_has_strong_binding(competitor, url, row.get("title") or ""):
-                        continue
                     source_text = "\n".join(
                         str(row.get(key) or "")
                         for key in ("crawl_error", "cleaned_excerpt_sample", "text_snapshot_excerpt", "reason")
                     )
-                    if not login_row_is_actual_auth_gate(url, row.get("title") or "", source_text):
+                    binding_text = f"{row.get('title') or ''}\n{source_text}\n{row.get('queued_urls') or ''}"
+                    if not login_row_has_strong_binding(competitor, url, binding_text):
+                        continue
+                    platform_assist = (
+                        bool(login_pool_platform_key_for_url_or_domain(url))
+                        and review_reason == "platform_login_assist_user_action"
+                        and bool(str(row.get("queued_urls") or "").strip())
+                    )
+                    if not platform_assist and not login_row_is_actual_auth_gate(url, row.get("title") or "", source_text):
                         continue
                     queued_urls = [
                         value.strip()
@@ -1863,7 +1911,7 @@ def load_login_required_reviews(out_dir: Path, limit: int = 200) -> List[dict]:
                     if not item.get("title") and row.get("title"):
                         item["title"] = row.get("title") or ""
                     for queued_url in queued_urls:
-                        queued_domain = login_pool_site_domain(queued_url)
+                        queued_domain = login_pool_platform_key_for_url_or_domain(queued_url) or login_pool_site_domain(queued_url)
                         if queued_domain and queued_domain != key[1]:
                             continue
                         if queued_url not in queued_urls_by_key[key]:

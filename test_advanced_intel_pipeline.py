@@ -501,6 +501,46 @@ class AdvancedIntelPipelineTest(unittest.TestCase):
         self.assertEqual(len(manual_rows), 1)
         self.assertEqual(manual_rows[0]["login_assist_url"], "https://apollo-go.example.com/login")
 
+    def test_platform_competitor_content_enters_login_pool_for_user_click(self):
+        audit_row = {
+            "competitor": "Atomic S9 FIS",
+            "url": "https://www.douyin.com/video/7170289680624192775",
+            "title": "ATOMIC S9FIS 到货 #滑雪",
+            "domain": "douyin.com",
+            "query": "atomic s9 fis site:douyin.com review",
+            "decision_status": "accepted",
+            "page_role": "video_or_social_content",
+            "source_kind": "community_or_social_signal",
+            "gui_review_candidate": "yes",
+            "gui_review_value_reason": "视频/社媒内容命中竞品和决策问题",
+            "reason": "brand_match: atomic; page_role: video_or_social_content",
+        }
+
+        manual_rows = rows_from_manual_review_queue([], [audit_row])
+        login_rows = login_required_queue_rows(manual_rows, [])
+
+        self.assertEqual(len(login_rows), 1)
+        self.assertEqual(login_rows[0]["domain"], "douyin.com")
+        self.assertEqual(login_rows[0]["login_assist_url"], "https://www.douyin.com/")
+        self.assertIn("https://www.douyin.com/video/7170289680624192775", login_rows[0]["queued_urls"])
+
+    def test_platform_login_pool_rejects_cross_domain_search_drift(self):
+        audit_row = {
+            "competitor": "Stockli Laser SL FIS",
+            "url": "https://v25.chaoxing.com",
+            "title": "登录",
+            "domain": "v25.chaoxing.com",
+            "query": "stockli laser sl fis site:reddit.com problem",
+            "hard_gate": "rejected_auth_or_transaction_shell",
+            "page_role": "auth_or_account_shell",
+            "source_kind": "public_web",
+            "reason": "brand_match: no distinctive competitor evidence in title/url/snippet",
+        }
+
+        manual_rows = rows_from_manual_review_queue([], [audit_row])
+
+        self.assertEqual(manual_rows, [])
+
     def test_login_assisted_snapshot_becomes_page_extract_for_analysis(self):
         with tempfile.TemporaryDirectory() as tmp:
             snapshot_path = Path(tmp) / "login-assisted.txt"

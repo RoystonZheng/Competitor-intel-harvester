@@ -274,6 +274,55 @@ VIDEO_SOCIAL_DOMAINS = {
     "weixin.qq.com",
 }
 
+LOGIN_ASSIST_PLATFORM_TARGETS = {
+    "douyin.com": {
+        "login_url": "https://www.douyin.com/",
+        "aliases": {"douyin.com", "www.douyin.com"},
+    },
+    "xiaohongshu.com": {
+        "login_url": "https://www.xiaohongshu.com/explore",
+        "aliases": {"xiaohongshu.com", "www.xiaohongshu.com", "xhslink.com"},
+    },
+    "tiktok.com": {
+        "login_url": "https://www.tiktok.com/login",
+        "aliases": {"tiktok.com", "www.tiktok.com"},
+    },
+    "instagram.com": {
+        "login_url": "https://www.instagram.com/accounts/login/",
+        "aliases": {"instagram.com", "www.instagram.com"},
+    },
+    "x.com": {
+        "login_url": "https://x.com/i/flow/login",
+        "aliases": {"x.com", "www.x.com"},
+    },
+    "twitter.com": {
+        "login_url": "https://twitter.com/i/flow/login",
+        "aliases": {"twitter.com", "www.twitter.com", "mobile.twitter.com"},
+    },
+    "zhihu.com": {
+        "login_url": "https://www.zhihu.com/signin",
+        "aliases": {"zhihu.com", "www.zhihu.com", "zhuanlan.zhihu.com"},
+    },
+    "reddit.com": {
+        "login_url": "https://www.reddit.com/login/",
+        "aliases": {"reddit.com", "www.reddit.com", "old.reddit.com"},
+    },
+    "bilibili.com": {
+        "login_url": "https://passport.bilibili.com/login",
+        "aliases": {"bilibili.com", "www.bilibili.com", "m.bilibili.com", "b23.tv"},
+    },
+    "weixin.qq.com": {
+        "login_url": "https://mp.weixin.qq.com/",
+        "aliases": {"mp.weixin.qq.com", "weixin.qq.com", "channels.weixin.qq.com", "web.wechat.com"},
+    },
+}
+
+LOGIN_ASSIST_PLATFORM_ALIASES = {
+    alias.lower().removeprefix("www."): canonical
+    for canonical, config in LOGIN_ASSIST_PLATFORM_TARGETS.items()
+    for alias in config["aliases"]
+}
+
 FORUM_COMMUNITY_DOMAINS = {
     "reddit.com",
     "zhihu.com",
@@ -871,6 +920,7 @@ MANUAL_REVIEW_FIELDS = [
     "cleaned_excerpt_sample",
     "gui_review_url",
     "login_assist_url",
+    "queued_urls",
     "suggested_next_step",
     "allowed_boundary",
 ]
@@ -909,6 +959,7 @@ LOGIN_REQUIRED_FIELDS = [
     "domain",
     "queued_url_count",
     "login_assist_url",
+    "queued_urls",
     "automated_review_status",
     "text_snapshot_path",
     "screenshot_path",
@@ -1202,13 +1253,39 @@ def site_domain_of(url: str) -> str:
     return ".".join(labels[-2:])
 
 
+def login_assist_platform_key_for_url_or_domain(value: str) -> str:
+    raw = textify(value).strip().lower()
+    if not raw:
+        return ""
+    candidate = raw if "://" in raw else f"https://{raw.lstrip('*.')}"
+    host = (urlparse(candidate).hostname or "").lower().strip(".")
+    if not host:
+        return ""
+    normalized_host = host.removeprefix("www.")
+    if normalized_host in LOGIN_ASSIST_PLATFORM_ALIASES:
+        return LOGIN_ASSIST_PLATFORM_ALIASES[normalized_host]
+    domain = site_domain_of(f"https://{host}")
+    if domain in LOGIN_ASSIST_PLATFORM_ALIASES:
+        return LOGIN_ASSIST_PLATFORM_ALIASES[domain]
+    if domain in LOGIN_ASSIST_PLATFORM_TARGETS:
+        return domain
+    return ""
+
+
+def login_queue_domain_key_for_url(url: str) -> str:
+    platform_key = login_assist_platform_key_for_url_or_domain(url)
+    if platform_key:
+        return platform_key
+    return site_domain_of(url)
+
+
 def normalize_login_queue_keyword(value: str) -> str:
     normalized = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", (value or "").lower()).strip()
     return re.sub(r"\s+", " ", normalized)
 
 
 def login_queue_key_for_values(competitor: str, url: str) -> Tuple[str, str]:
-    site_domain = site_domain_of(url)
+    site_domain = login_queue_domain_key_for_url(url)
     stable_target = site_domain or canonical_url_for_dedupe(url) or url
     return normalize_login_queue_keyword(competitor), stable_target.strip().lower()
 
@@ -5831,6 +5908,75 @@ def login_pool_excluded_by_context(*values: str) -> bool:
     return bool(keyword_hits(haystack, LOGIN_POOL_EXCLUDE_HINTS))
 
 
+def query_site_filters(query: str) -> List[str]:
+    filters = []
+    for match in re.finditer(r"\bsite:([A-Za-z0-9*_.-]+(?:\.[A-Za-z0-9*_.-]+)+)", textify(query), re.I):
+        value = match.group(1).strip().lower().lstrip("*.").removeprefix("www.")
+        if value:
+            filters.append(value)
+    return unique_strings(filters)
+
+
+def query_site_filter_matches_url(query: str, url: str) -> bool:
+    filters = query_site_filters(query)
+    if not filters:
+        return True
+    url_host = (urlparse(textify(url)).hostname or "").lower().strip(".").removeprefix("www.")
+    url_domain = site_domain_of(url)
+    url_platform = login_assist_platform_key_for_url_or_domain(url)
+    for site_filter in filters:
+        filter_platform = login_assist_platform_key_for_url_or_domain(site_filter)
+        filter_domain = site_domain_of(f"https://{site_filter}")
+        if filter_platform and url_platform == filter_platform:
+            return True
+        if url_domain and filter_domain and url_domain == filter_domain:
+            return True
+        if url_host and (url_host == site_filter or url_host.endswith("." + site_filter)):
+            return True
+    return False
+
+
+def platform_login_assist_target(row: Mapping[str, Any]) -> Dict[str, str]:
+    url = textify(row.get("url") or row.get("gui_review_url") or row.get("login_assist_url"))
+    platform_key = login_assist_platform_key_for_url_or_domain(url)
+    if not platform_key:
+        return {}
+    if not query_site_filter_matches_url(textify(row.get("query")), url):
+        return {}
+
+    competitor = textify(row.get("competitor"))
+    title = textify(row.get("title"))
+    snippet = textify(row.get("cleaned_excerpt_sample") or row.get("snippet"))
+    reason = textify(row.get("reason") or row.get("selection_note") or row.get("gui_review_value_reason"))
+    if login_pool_excluded_by_context(url, title, snippet):
+        return {}
+    if not competitor_strong_binding(competitor, url, title, snippet, reason):
+        return {}
+
+    page_role = textify(row.get("page_role"))
+    source_kind = textify(row.get("source_kind"))
+    decision_status = textify(row.get("decision_status")).lower()
+    gui_candidate = textify(row.get("gui_review_candidate")).lower() == "yes"
+    platform_reviewable = (
+        page_role in {"video_or_social_content", "forum_or_community_discussion"}
+        or source_kind == "community_or_social_signal"
+    )
+    if not platform_reviewable:
+        return {}
+    if decision_status not in {"accepted", "signal"} and not gui_candidate:
+        return {}
+
+    config = LOGIN_ASSIST_PLATFORM_TARGETS.get(platform_key, {})
+    login_url = textify(config.get("login_url"))
+    if not login_url:
+        return {}
+    return {
+        "platform_domain": platform_key,
+        "login_url": login_url,
+        "queued_url": url,
+    }
+
+
 def audit_login_queue_eligible(row: Mapping[str, Any]) -> bool:
     if not audit_requires_user_login(row):
         return False
@@ -5937,8 +6083,17 @@ def dedupe_login_review_rows(rows: Sequence[Mapping[str, Any]]) -> List[Dict[str
             by_key[key] = dict(row)
             queued_urls[key] = []
             deduped.append(by_key[key])
-        if url not in queued_urls[key]:
-            queued_urls[key].append(url)
+        row_queued_urls = [
+            value.strip()
+            for value in textify(row.get("queued_urls")).splitlines()
+            if value.strip()
+        ] or [textify(row.get("url")) or url]
+        for queued_url in row_queued_urls:
+            queued_domain = login_queue_domain_key_for_url(queued_url)
+            if queued_domain and queued_domain != key[1]:
+                continue
+            if queued_url not in queued_urls[key]:
+                queued_urls[key].append(queued_url)
     for row in deduped:
         key = login_queue_key_for(row)
         urls = queued_urls.get(key, [])
@@ -6044,6 +6199,7 @@ def rows_from_manual_review_queue(
                 "cleaned_excerpt_sample": truncate_text(page.text_excerpt, 500),
                 "gui_review_url": page.url,
                 "login_assist_url": page.url if page_requires_user_login(page) else "",
+                "queued_urls": page.url if page_requires_user_login(page) else "",
                 "suggested_next_step": manual_review_next_step(page),
                 "allowed_boundary": (
                     login_review_allowed_boundary()
@@ -6060,7 +6216,8 @@ def rows_from_manual_review_queue(
             and textify(row.get("decision_status")).lower() in {"signal", "accepted"}
             and not textify(row.get("hard_gate")).startswith("rejected_auth_or_transaction_shell")
         )
-        login_required = audit_login_queue_eligible(row)
+        platform_target = platform_login_assist_target(row)
+        login_required = audit_login_queue_eligible(row) or bool(platform_target)
         if textify(row.get("gui_review_candidate")).lower() != "yes" and not login_required and not adapter_reviewable:
             continue
         key = (textify(row.get("competitor")), url)
@@ -6083,15 +6240,24 @@ def rows_from_manual_review_queue(
             {
                 "competitor": textify(row.get("competitor")),
                 "priority": "P0-LOGIN" if login_required else manual_review_priority_from_evidence(row),
-                "review_reason": "login_required_user_action" if login_required else ("public_source_adapter_candidate" if adapter_reviewable else "pre_crawl_value_candidate"),
+                "review_reason": (
+                    "platform_login_assist_user_action"
+                    if platform_target
+                    else (
+                        "login_required_user_action"
+                        if login_required
+                        else ("public_source_adapter_candidate" if adapter_reviewable else "pre_crawl_value_candidate")
+                    )
+                ),
                 "requires_user_login": "yes" if login_required else "no",
                 "title": textify(row.get("title")),
                 "url": key[1],
-                "domain": textify(row.get("domain")) or domain_of(key[1]),
+                "domain": platform_target.get("platform_domain") or textify(row.get("domain")) or domain_of(key[1]),
                 "crawl_error": textify(row.get("hard_gate")) or textify(row.get("rejection_code")) or "not_crawled_pre_crawl_candidate",
                 "cleaned_excerpt_sample": truncate_text(row.get("reason", ""), 500),
                 "gui_review_url": key[1],
-                "login_assist_url": key[1] if login_required else "",
+                "login_assist_url": platform_target.get("login_url") or (key[1] if login_required else ""),
+                "queued_urls": platform_target.get("queued_url") or (key[1] if login_required else ""),
                 "suggested_next_step": reason,
                 "allowed_boundary": (
                     login_review_allowed_boundary()
@@ -6646,7 +6812,7 @@ class LoginAssistSession:
             "requires_user_login": "yes",
             "title": textify(row.get("title")),
             "url": url,
-            "domain": site_domain_of(url) or domain_of(url) or textify(row.get("domain")),
+            "domain": login_queue_domain_key_for_url(url) or domain_of(url) or textify(row.get("domain")),
             "adapter_name": "",
             "source_family": "",
             "platform": "",
@@ -7123,9 +7289,10 @@ def login_required_queue_rows(
                 "review_reason": textify(row.get("review_reason")) or "login_required_user_action",
                 "title": textify(row.get("title")),
                 "url": target_url,
-                "domain": site_domain_of(target_url) or domain_of(target_url) or textify(row.get("domain")),
+                "domain": login_queue_domain_key_for_url(target_url) or domain_of(target_url) or textify(row.get("domain")),
                 "queued_url_count": textify(row.get("queued_url_count")) or "1",
                 "login_assist_url": target_url,
+                "queued_urls": textify(row.get("queued_urls")) or textify(row.get("url")) or target_url,
                 "automated_review_status": textify(gui.get("automated_review_status")) or "requires_user_login",
                 "text_snapshot_path": textify(gui.get("text_snapshot_path")),
                 "screenshot_path": textify(gui.get("screenshot_path")),
@@ -7150,8 +7317,8 @@ def write_login_required_queue(path: Path, rows: Sequence[Mapping[str, Any]]) ->
         lines += ["本轮没有检测到需登录页面。", ""]
     else:
         lines += [
-            "| 优先级 | 竞品 | 状态 | 同站点排队 URL | URL | 快照 | 截图 | 下一步 |",
-            "|---|---|---|---:|---|---|---|---|",
+            "| 优先级 | 竞品 | 状态 | 同站点排队 URL | 登录入口 | 待补采 URL | 快照 | 截图 | 下一步 |",
+            "|---|---|---|---:|---|---|---|---|---|",
         ]
         for row in rows:
             lines.append(
@@ -7164,6 +7331,7 @@ def write_login_required_queue(path: Path, rows: Sequence[Mapping[str, Any]]) ->
                         row.get("automated_review_status"),
                         row.get("queued_url_count") or "1",
                         row.get("url"),
+                        row.get("queued_urls") or row.get("login_assist_url") or row.get("url"),
                         row.get("text_snapshot_path") or "无",
                         row.get("screenshot_path") or "无",
                         row.get("next_step"),

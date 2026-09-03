@@ -114,6 +114,21 @@ class JobTimingTest(unittest.TestCase):
         self.assertEqual(rows[0]["domain"], "demo.example")
         self.assertEqual(rows[0]["queued_url_count"], "2")
 
+    def test_load_login_required_reviews_allows_platform_login_assist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = Path(tmp) / "需登录队列.csv"
+            queue.write_text(
+                "competitor,domain,title,url,login_assist_url,queued_urls,requires_user_login,review_reason,automated_review_status,next_step\n"
+                "Atomic S9 FIS,douyin.com,ATOMIC S9FIS 到货 #滑雪,https://www.douyin.com/,https://www.douyin.com/,https://www.douyin.com/video/7170289680624192775,yes,platform_login_assist_user_action,requires_user_login,请点击登录池后继续\n",
+                encoding="utf-8-sig",
+            )
+
+            rows = app.load_login_required_reviews(Path(tmp))
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["domain"], "douyin.com")
+        self.assertIn("7170289680624192775", rows[0]["queued_urls"])
+
     def test_record_login_open_request_dedupes_by_competitor_and_domain(self):
         original_runs_dir = app.RUNS_DIR
         with tempfile.TemporaryDirectory() as tmp:
