@@ -1168,6 +1168,51 @@ def domain_of(url: str) -> str:
     return host
 
 
+LOGIN_QUEUE_MULTI_LABEL_SUFFIXES = {
+    "co.uk",
+    "com.au",
+    "com.br",
+    "com.cn",
+    "com.hk",
+    "com.sg",
+    "com.tw",
+    "co.jp",
+    "co.kr",
+    "net.cn",
+    "org.cn",
+}
+
+LOGIN_QUEUE_RESERVED_TEST_SUFFIXES = {"example.com", "example.net", "example.org"}
+
+
+def site_domain_of(url: str) -> str:
+    host = (urlparse(url or "").hostname or "").lower().strip(".")
+    if host.startswith("www."):
+        host = host[4:]
+    if not host or host == "localhost" or re.fullmatch(r"\d+(?:\.\d+){3}", host):
+        return host
+    labels = [label for label in host.split(".") if label]
+    if len(labels) <= 2:
+        return host
+    suffix = ".".join(labels[-2:])
+    if suffix in LOGIN_QUEUE_RESERVED_TEST_SUFFIXES and len(labels) >= 3:
+        return ".".join(labels[-3:])
+    if suffix in LOGIN_QUEUE_MULTI_LABEL_SUFFIXES and len(labels) >= 3:
+        return ".".join(labels[-3:])
+    return ".".join(labels[-2:])
+
+
+def normalize_login_queue_keyword(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", (value or "").lower()).strip()
+    return re.sub(r"\s+", " ", normalized)
+
+
+def login_queue_key_for_values(competitor: str, url: str) -> Tuple[str, str]:
+    site_domain = site_domain_of(url)
+    stable_target = site_domain or canonical_url_for_dedupe(url) or url
+    return normalize_login_queue_keyword(competitor), stable_target.strip().lower()
+
+
 def domain_matches(domain: str, domains: Iterable[str]) -> bool:
     return domain in domains or any(domain.endswith("." + item) for item in domains)
 
@@ -5800,24 +5845,6 @@ def audit_login_queue_eligible(row: Mapping[str, Any]) -> bool:
         return False
     if competitor_strong_binding(competitor, url, title, snippet):
         return True
-    source_kind = textify(row.get("source_kind"))
-    matched_fields = textify(row.get("matched_fields"))
-    value_signals = textify(row.get("value_signals"))
-    try:
-        pm_value = int(float(textify(row.get("pm_value_score")) or 0))
-    except ValueError:
-        pm_value = 0
-    try:
-        category_fit = int(float(textify(row.get("category_fit_score")) or 0))
-    except ValueError:
-        category_fit = 0
-    has_value_signal = bool(matched_fields or ("决策相关" in value_signals and "信息增量" in value_signals))
-    if source_kind.startswith("official") and has_value_signal:
-        return True
-    if textify(row.get("selected")).lower() == "yes" and (has_value_signal or pm_value >= 2 or category_fit >= 1):
-        return True
-    if pm_value >= 3 and category_fit >= 1 and competitor_has_relevance(competitor, url, title, snippet, reason):
-        return True
     return False
 
 
@@ -5856,9 +5883,8 @@ def review_target_url(row: Mapping[str, Any]) -> str:
 
 def login_queue_key_for(row: Mapping[str, Any]) -> Tuple[str, str]:
     url = review_target_url(row)
-    domain = domain_of(url)
     competitor = textify(row.get("competitor"))
-    return competitor, domain or canonical_url_for_dedupe(url) or url
+    return login_queue_key_for_values(competitor, url)
 
 
 def review_queue_key_for(row: Mapping[str, Any]) -> Tuple[str, str]:
@@ -5869,9 +5895,8 @@ def review_queue_key_for(row: Mapping[str, Any]) -> Tuple[str, str]:
 
 
 def login_click_marker_id(competitor: str, url: str) -> str:
-    domain = domain_of(url)
-    stable_target = domain or canonical_url_for_dedupe(url) or url
-    raw = f"{textify(competitor).strip().lower()}::{stable_target.strip().lower()}"
+    keyword, stable_target = login_queue_key_for_values(competitor, url)
+    raw = f"{keyword}::{stable_target}"
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
 
@@ -6056,7 +6081,7 @@ def rows_from_manual_review_queue(
         )
         rows.append(
             {
-                "competitor": key[0],
+                "competitor": textify(row.get("competitor")),
                 "priority": "P0-LOGIN" if login_required else manual_review_priority_from_evidence(row),
                 "review_reason": "login_required_user_action" if login_required else ("public_source_adapter_candidate" if adapter_reviewable else "pre_crawl_value_candidate"),
                 "requires_user_login": "yes" if login_required else "no",
@@ -6621,7 +6646,7 @@ class LoginAssistSession:
             "requires_user_login": "yes",
             "title": textify(row.get("title")),
             "url": url,
-            "domain": domain_of(url) or textify(row.get("domain")),
+            "domain": site_domain_of(url) or domain_of(url) or textify(row.get("domain")),
             "adapter_name": "",
             "source_family": "",
             "platform": "",
@@ -6708,18 +6733,10 @@ class LoginAssistSession:
 
         rows: List[Dict[str, Any]] = []
         for index, (key, row) in enumerate(self.rows_by_key.items(), start=1):
-            page = self.pages_by_key.get(key)
-            status, text_path, screenshot_path, excerpt, next_step = self._capture_page(index, page, row)
-            result = self._result_from_row(
-                row,
-                status,
-                text_path=text_path,
-                screenshot_path=screenshot_path,
-                excerpt=excerpt,
-                next_step=next_step,
-            )
-            self.results_by_key[key] = result
-            rows.append(result)
+            key_results = self._capture_key_results(index, key, row)
+            if key_results:
+                self.results_by_key[key] = key_results[0]
+                rows.extend(key_results)
         return rows
 
     def _readable_snapshot(self, page: Any, row: Mapping[str, Any]) -> Tuple[bool, str, str]:
@@ -6742,9 +6759,10 @@ class LoginAssistSession:
         readable = bool(cleaned and not looks_like_login_form(page_url, title, cleaned) and len(cleaned) >= 240)
         return readable, title, cleaned
 
-    def _capture_page(self, index: int, page: Any, row: Mapping[str, Any]) -> Tuple[str, str, str, str, str]:
+    def _capture_page(self, index: int, page: Any, row: Mapping[str, Any], ordinal: int = 0) -> Tuple[str, str, str, str, str]:
         url = review_target_url(row)
-        slug = f"{index:03d}-{slugify(textify(row.get('competitor')) or domain_of(url) or 'login')}"
+        index_label = f"{index:03d}" if ordinal <= 1 else f"{index:03d}-{ordinal:02d}"
+        slug = f"{index_label}-{slugify(textify(row.get('competitor')) or site_domain_of(url) or domain_of(url) or 'login')}"
         screenshot_path = self.snapshot_dir / f"{slug}-login-assisted.png"
         text_path = self.snapshot_dir / f"{slug}-login-assisted.txt"
         if login_skip_requested(self.out_dir, row):
@@ -6792,6 +6810,76 @@ class LoginAssistSession:
             read_snapshot_excerpt(text_file),
             "公开页面采集已结束并等待登录超时；该站点保留到问题页面核验清单。",
         )
+
+    def _capture_key_results(self, index: int, key: Tuple[str, str], row: Mapping[str, Any]) -> List[Dict[str, Any]]:
+        page = self.pages_by_key.get(key)
+        clicked = login_click_requested(self.out_dir, row)
+        skipped = login_skip_requested(self.out_dir, row)
+        if skipped or not clicked:
+            status, text_path, screenshot_path, excerpt, next_step = self._capture_page(index, page, row)
+            return [
+                self._result_from_row(
+                    row,
+                    status,
+                    text_path=text_path,
+                    screenshot_path=screenshot_path,
+                    excerpt=excerpt,
+                    next_step=next_step,
+                )
+            ]
+        readable, _title, _cleaned = self._readable_snapshot(page, row)
+        if not readable:
+            status, text_path, screenshot_path, excerpt, next_step = self._capture_page(index, page, row)
+            return [
+                self._result_from_row(
+                    row,
+                    status,
+                    text_path=text_path,
+                    screenshot_path=screenshot_path,
+                    excerpt=excerpt,
+                    next_step=next_step,
+                )
+            ]
+
+        queued_urls = self.queued_urls_by_key.get(key) or [review_target_url(row)]
+        unique_urls = [url for url in dict.fromkeys(queued_urls) if url]
+        if not unique_urls:
+            unique_urls = [review_target_url(row)]
+        results: List[Dict[str, Any]] = []
+        for ordinal, url in enumerate(unique_urls, start=1):
+            capture_row = dict(row)
+            capture_row["url"] = url
+            capture_row["login_assist_url"] = url
+            capture_row["queued_url_count"] = str(len(unique_urls))
+            capture_row["queued_urls"] = "\n".join(unique_urls)
+            try:
+                if page is not None and canonical_url_for_dedupe(textify(page.url)) != canonical_url_for_dedupe(url):
+                    page.goto(url, wait_until="domcontentloaded", timeout=self.timeout * 1000)
+            except Exception as exc:
+                result = self._result_from_row(
+                    capture_row,
+                    "login_assist_timeout",
+                    next_step=f"登录态已复用，但访问同站点排队 URL 失败：{exc}",
+                )
+                results.append(result)
+                continue
+            status, text_path, screenshot_path, excerpt, next_step = self._capture_page(
+                index,
+                page,
+                capture_row,
+                ordinal=ordinal if len(unique_urls) > 1 else 0,
+            )
+            results.append(
+                self._result_from_row(
+                    capture_row,
+                    status,
+                    text_path=text_path,
+                    screenshot_path=screenshot_path,
+                    excerpt=excerpt,
+                    next_step=next_step,
+                )
+            )
+        return results
 
     def close(self) -> None:
         try:
@@ -7035,7 +7123,7 @@ def login_required_queue_rows(
                 "review_reason": textify(row.get("review_reason")) or "login_required_user_action",
                 "title": textify(row.get("title")),
                 "url": target_url,
-                "domain": domain_of(target_url) or textify(row.get("domain")),
+                "domain": site_domain_of(target_url) or domain_of(target_url) or textify(row.get("domain")),
                 "queued_url_count": textify(row.get("queued_url_count")) or "1",
                 "login_assist_url": target_url,
                 "automated_review_status": textify(gui.get("automated_review_status")) or "requires_user_login",

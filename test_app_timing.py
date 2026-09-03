@@ -98,6 +98,22 @@ class JobTimingTest(unittest.TestCase):
         self.assertEqual(rows[0]["competitor"], "Demo")
         self.assertEqual(rows[0]["login_assist_url"], "https://demo.example/login")
 
+    def test_load_login_required_reviews_dedupes_same_keyword_root_domain(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = Path(tmp) / "需登录队列.csv"
+            queue.write_text(
+                "competitor,domain,title,url,login_assist_url,requires_user_login,automated_review_status,next_step\n"
+                "Demo Product,accounts.demo.example,Demo Product login,https://accounts.demo.example/login,https://accounts.demo.example/login,yes,awaiting_user_login,请登录后继续\n"
+                "Demo Product,app.demo.example,Demo Product account,https://app.demo.example/account/login,https://app.demo.example/account/login,yes,awaiting_user_login,请登录后继续\n",
+                encoding="utf-8-sig",
+            )
+
+            rows = app.load_login_required_reviews(Path(tmp))
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["domain"], "demo.example")
+        self.assertEqual(rows[0]["queued_url_count"], "2")
+
     def test_record_login_open_request_dedupes_by_competitor_and_domain(self):
         original_runs_dir = app.RUNS_DIR
         with tempfile.TemporaryDirectory() as tmp:
@@ -114,6 +130,27 @@ class JobTimingTest(unittest.TestCase):
                 self.assertTrue(Path(first["marker_path"]).exists())
             finally:
                 app.RUNS_DIR = original_runs_dir
+
+    def test_record_login_open_request_dedupes_subdomains_for_same_keyword(self):
+        original_runs_dir = app.RUNS_DIR
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app.RUNS_DIR = root / "runs"
+            job_id = "20260831-120000-abcdef"
+            job_dir = app.RUNS_DIR / job_id
+            job_dir.mkdir(parents=True)
+
+            try:
+                first = app.record_login_open_request(job_id, "Demo Product", "https://accounts.demo.example/login")
+                second = app.record_login_open_request(job_id, "Demo Product", "https://app.demo.example/account")
+                self.assertEqual(first["marker_path"], second["marker_path"])
+                self.assertEqual(first["domain"], "demo.example")
+            finally:
+                app.RUNS_DIR = original_runs_dir
+
+    def test_login_pool_module_stays_visible_for_active_jobs(self):
+        self.assertIn("登录等待池", app.INDEX_HTML)
+        self.assertIn("const showPool = Boolean(job && job.id)", app.INDEX_HTML)
 
     def test_login_skip_request_hides_row_from_login_pool(self):
         original_runs_dir = app.RUNS_DIR

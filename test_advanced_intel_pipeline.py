@@ -714,6 +714,29 @@ class AdvancedIntelPipelineTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["queued_url_count"], "2")
 
+    def test_login_required_queue_dedupes_same_keyword_root_domain(self):
+        rows = dedupe_login_review_rows(
+            [
+                {
+                    "competitor": "Demo Product",
+                    "review_reason": "login_required_user_action",
+                    "requires_user_login": "yes",
+                    "url": "https://accounts.demo.example/login",
+                    "login_assist_url": "https://accounts.demo.example/login",
+                },
+                {
+                    "competitor": "Demo Product",
+                    "review_reason": "login_required_user_action",
+                    "requires_user_login": "yes",
+                    "url": "https://app.demo.example/account",
+                    "login_assist_url": "https://app.demo.example/account",
+                },
+            ]
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["queued_url_count"], "2")
+
     def test_login_assist_session_queues_without_opening_browser_pages(self):
         events = []
 
@@ -759,6 +782,75 @@ class AdvancedIntelPipelineTest(unittest.TestCase):
         self.assertEqual(added, 1)
         self.assertEqual(queue[0]["queued_url_count"], "2")
         self.assertEqual(events, [])
+
+    def test_login_assist_session_click_reuses_profile_for_same_domain_urls(self):
+        events = []
+
+        class FakeLocator:
+            def inner_text(self, **_kwargs):
+                return "Demo Product pricing specs release notes " * 20
+
+        class FakePage:
+            def __init__(self):
+                self.url = "https://demo.example/dashboard"
+
+            def is_closed(self):
+                return False
+
+            def goto(self, url, **_kwargs):
+                events.append(("goto", url))
+                self.url = url
+
+            def title(self):
+                return "Demo Product"
+
+            def locator(self, _selector):
+                return FakeLocator()
+
+            def screenshot(self, path, **_kwargs):
+                Path(path).write_bytes(b"fake image")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            session = competitor_harvester.LoginAssistSession(out_dir)
+            session.add_rows(
+                [
+                    {
+                        "competitor": "Demo Product",
+                        "review_reason": "login_required_user_action",
+                        "requires_user_login": "yes",
+                        "url": "https://accounts.demo.example/login",
+                        "login_assist_url": "https://accounts.demo.example/login",
+                    },
+                    {
+                        "competitor": "Demo Product",
+                        "review_reason": "login_required_user_action",
+                        "requires_user_login": "yes",
+                        "url": "https://app.demo.example/pricing",
+                        "login_assist_url": "https://app.demo.example/pricing",
+                    },
+                ]
+            )
+            key = next(iter(session.rows_by_key))
+            session.pages_by_key[key] = FakePage()
+            click_path = competitor_harvester.login_click_marker_path(
+                out_dir,
+                "Demo Product",
+                "https://accounts.demo.example/login",
+            )
+            click_path.parent.mkdir(parents=True)
+            click_path.write_text("{}", encoding="utf-8")
+
+            rows = session.capture_all(wait_seconds=0)
+
+        self.assertEqual([row["automated_review_status"] for row in rows], ["login_assisted_snapshot_captured", "login_assisted_snapshot_captured"])
+        self.assertEqual(
+            events,
+            [
+                ("goto", "https://accounts.demo.example/login"),
+                ("goto", "https://app.demo.example/pricing"),
+            ],
+        )
 
     def test_login_assist_session_honors_skip_marker_without_opening_browser_pages(self):
         events = []

@@ -857,18 +857,26 @@ INDEX_HTML = r"""<!doctype html>
     function renderLoginReviews(job) {
       const rows = job.login_required_reviews || [];
       clearChildren(loginReviewBannerEl);
-      if (!rows.length) {
+      const showPool = Boolean(job && job.id);
+      if (!showPool && !rows.length) {
         loginReviewBannerEl.hidden = true;
         return;
       }
       loginReviewBannerEl.hidden = false;
       const title = document.createElement('div');
       title.className = 'login-review-title';
-      title.textContent = `发现 ${rows.length} 个需登录/注册页面`;
+      title.textContent = rows.length ? `登录等待池：发现 ${rows.length} 个需登录/注册站点` : '登录等待池：暂无需登录/注册的相关站点';
       const body = document.createElement('div');
-      body.textContent = '这些站点已按竞品和域名去重。工具不会主动打开登录网页；只有点击下面的登录按钮，采集进程才会访问该站点。公开页面会继续采集，等待期结束仍未登录的会进入“问题页面核验清单”。';
+      body.textContent = rows.length
+        ? '这些站点已按关键词和站点根域去重。工具不会主动打开登录网页；只有点击下面的登录按钮，采集进程才会访问该站点。同关键词同域名只进池一次，登录后该域名下排队 URL 会复用同一登录态继续抓取。'
+        : '当前没有通过相关性和登录页校验的站点。偏离竞品的登录页、展示页里的登录导航、招聘/邮箱/账号中心等噪声不会进入等待池。';
       const batchActions = document.createElement('div');
       batchActions.className = 'login-review-actions';
+      loginReviewBannerEl.appendChild(title);
+      loginReviewBannerEl.appendChild(body);
+      if (!rows.length) {
+        return;
+      }
       const skipAllBtn = document.createElement('button');
       skipAllBtn.type = 'button';
       skipAllBtn.className = 'skip';
@@ -927,8 +935,6 @@ INDEX_HTML = r"""<!doctype html>
         item.appendChild(buttons);
         actions.appendChild(item);
       });
-      loginReviewBannerEl.appendChild(title);
-      loginReviewBannerEl.appendChild(body);
       loginReviewBannerEl.appendChild(batchActions);
       loginReviewBannerEl.appendChild(actions);
     }
@@ -1622,6 +1628,60 @@ LOGIN_AUTH_FORM_TERMS = {
 }
 
 
+LOGIN_POOL_MULTI_LABEL_SUFFIXES = {
+    "co.uk",
+    "com.au",
+    "com.br",
+    "com.cn",
+    "com.hk",
+    "com.sg",
+    "com.tw",
+    "co.jp",
+    "co.kr",
+    "net.cn",
+    "org.cn",
+}
+
+LOGIN_POOL_RESERVED_TEST_SUFFIXES = {"example.com", "example.net", "example.org"}
+
+
+def canonical_url_for_app_dedupe(url: str) -> str:
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw)
+    path = re.sub(r"/+$", "", parsed.path or "")
+    return f"{(parsed.scheme or '').lower()}://{parsed.netloc.lower()}{path}".strip(":")
+
+
+def login_pool_site_domain(url: str) -> str:
+    host = (urlparse(url or "").hostname or "").lower().strip(".")
+    if host.startswith("www."):
+        host = host[4:]
+    if not host or host == "localhost" or re.fullmatch(r"\d+(?:\.\d+){3}", host):
+        return host
+    labels = [label for label in host.split(".") if label]
+    if len(labels) <= 2:
+        return host
+    suffix = ".".join(labels[-2:])
+    if suffix in LOGIN_POOL_RESERVED_TEST_SUFFIXES and len(labels) >= 3:
+        return ".".join(labels[-3:])
+    if suffix in LOGIN_POOL_MULTI_LABEL_SUFFIXES and len(labels) >= 3:
+        return ".".join(labels[-3:])
+    return ".".join(labels[-2:])
+
+
+def normalize_login_pool_keyword(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", (value or "").lower()).strip()
+    return re.sub(r"\s+", " ", normalized)
+
+
+def login_pool_key_for_values(competitor: str, url: str) -> Tuple[str, str]:
+    site_domain = login_pool_site_domain(url)
+    stable_target = site_domain or canonical_url_for_app_dedupe(url) or url
+    return normalize_login_pool_keyword(competitor), stable_target.strip().lower()
+
+
 def login_url_has_auth_gate_path(url: str) -> bool:
     parsed = urlparse(url or "")
     host = (parsed.hostname or "").lower()
@@ -1736,8 +1796,8 @@ def load_login_required_reviews(out_dir: Path, limit: int = 200) -> List[dict]:
         "人工复核队列.csv",
         "manual_review_queue.csv",
     ]
-    rows: List[dict] = []
-    seen = set()
+    rows_by_key: Dict[Tuple[str, str], dict] = {}
+    queued_urls_by_key: Dict[Tuple[str, str], List[str]] = {}
     candidate_paths: List[Path] = []
     seen_paths = set()
     for name in candidate_names:
@@ -1762,13 +1822,14 @@ def load_login_required_reviews(out_dir: Path, limit: int = 200) -> List[dict]:
                     if not requires_login and review_reason != "login_required_user_action" and "login" not in status.lower():
                         continue
                     url = row.get("login_assist_url") or row.get("url") or row.get("gui_review_url") or ""
-                    domain = row.get("domain") or (urlparse(url).netloc or "").lower().removeprefix("www.")
-                    key = (row.get("competitor") or "", domain or url)
-                    if not url or key in seen:
+                    competitor = row.get("competitor") or ""
+                    domain = login_pool_site_domain(url) or (row.get("domain") or (urlparse(url).netloc or "").lower().removeprefix("www."))
+                    key = login_pool_key_for_values(competitor, url)
+                    if not url or not key[1]:
                         continue
-                    if login_request_marker_exists(out_dir, key[0], url, "skip"):
+                    if login_request_marker_exists(out_dir, competitor, url, "skip"):
                         continue
-                    if not login_row_has_strong_binding(key[0], url, row.get("title") or ""):
+                    if not login_row_has_strong_binding(competitor, url, row.get("title") or ""):
                         continue
                     source_text = "\n".join(
                         str(row.get(key) or "")
@@ -1776,26 +1837,44 @@ def load_login_required_reviews(out_dir: Path, limit: int = 200) -> List[dict]:
                     )
                     if not login_row_is_actual_auth_gate(url, row.get("title") or "", source_text):
                         continue
-                    seen.add(key)
-                    rows.append(
-                        {
-                            "competitor": row.get("competitor") or "",
+                    queued_urls = [
+                        value.strip()
+                        for value in str(row.get("queued_urls") or "").splitlines()
+                        if value.strip()
+                    ] or [url]
+                    if key not in rows_by_key:
+                        rows_by_key[key] = {
+                            "competitor": competitor,
                             "domain": domain,
                             "title": row.get("title") or "",
                             "url": row.get("url") or url,
                             "login_assist_url": url,
-                            "queued_url_count": row.get("queued_url_count") or "1",
+                            "queued_url_count": "1",
+                            "queued_urls": "",
                             "automated_review_status": status or "requires_user_login",
-                            "login_click_requested": "yes" if login_request_marker_exists(out_dir, key[0], url, "click") else "no",
+                            "login_click_requested": "yes" if login_request_marker_exists(out_dir, competitor, url, "click") else "no",
                             "login_skip_requested": "no",
                             "next_step": row.get("next_step") or row.get("suggested_next_step") or "",
                         }
-                    )
-                    if len(rows) >= limit:
-                        return rows
+                        queued_urls_by_key[key] = []
+                    item = rows_by_key[key]
+                    if item.get("login_click_requested") != "yes" and login_request_marker_exists(out_dir, competitor, url, "click"):
+                        item["login_click_requested"] = "yes"
+                    if not item.get("title") and row.get("title"):
+                        item["title"] = row.get("title") or ""
+                    for queued_url in queued_urls:
+                        queued_domain = login_pool_site_domain(queued_url)
+                        if queued_domain and queued_domain != key[1]:
+                            continue
+                        if queued_url not in queued_urls_by_key[key]:
+                            queued_urls_by_key[key].append(queued_url)
+                    item["queued_url_count"] = str(len(queued_urls_by_key[key]) or 1)
+                    item["queued_urls"] = "\n".join(queued_urls_by_key[key])
+                    if len(rows_by_key) >= limit:
+                        return list(rows_by_key.values())
         except OSError:
             continue
-    return rows
+    return list(rows_by_key.values())
 
 
 def load_problem_reviews(out_dir: Path, limit: int = 50) -> List[dict]:
@@ -2273,10 +2352,8 @@ def latest_job_dir_with_training_reviews() -> Optional[Path]:
 
 
 def login_click_marker_id(competitor: str, url: str) -> str:
-    parsed = urlparse(url)
-    domain = (parsed.netloc or "").lower().removeprefix("www.")
-    stable_target = domain or url
-    raw = f"{(competitor or '').strip().lower()}::{stable_target.strip().lower()}"
+    keyword, stable_target = login_pool_key_for_values(competitor, url)
+    raw = f"{keyword}::{stable_target}"
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
 
@@ -2305,7 +2382,7 @@ def record_login_request(job_id: str, competitor: str, url: str, kind: str) -> d
         "job_id": job_id,
         "competitor": competitor,
         "url": url,
-        "domain": (urlparse(url).netloc or "").lower().removeprefix("www."),
+        "domain": login_pool_site_domain(url) or (urlparse(url).netloc or "").lower().removeprefix("www."),
         "action": kind,
         "requested_at": clicked_at,
         "requested_at_label": format_local_time(clicked_at),
